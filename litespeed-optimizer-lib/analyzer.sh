@@ -214,6 +214,23 @@ run_analyze() {
         else
             _az_check 8 cache "checkPublicCache off — public cache never consulted" fail "optimize --feature lscache"
         fi
+        # Vhost rewrite engine: with rewrite disabled, LSCWP's .htaccess vary
+        # rules never run on OLS -> cart/cookie vary breaks (cache poisoning).
+        # Found empirically in the WP+Woo Docker E2E.
+        if [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ] && [ -d "${LSO_VHOSTS_DIR:-/nonexistent}" ]; then
+            local vh_bad="" vhconf
+            for vhconf in "${LSO_VHOSTS_DIR}"/*/vhconf.conf; do
+                [ -f "$vhconf" ] || continue
+                if awk '/^rewrite[[:space:]]*\{/,/\}/' "$vhconf" | grep -qE 'enable[[:space:]]+0'; then
+                    vh_bad="${vh_bad} $(basename "$(dirname "$vhconf")")"
+                fi
+            done
+            if [ -n "$vh_bad" ]; then
+                _az_check 5 cache "vhost rewrite DISABLED (${vh_bad# }) — LSCWP vary cookies dead, carts can cache-poison" danger "set 'rewrite { enable 1, autoLoadHtaccess 1 }' in vhconf.conf and restart"
+            else
+                _az_check 5 cache "vhost rewrite engine enabled (LSCWP vary cookies functional)" pass ""
+            fi
+        fi
     else
         _az_check 16 cache "CacheRoot/CacheEngine (Enterprise include)" skip ""
     fi

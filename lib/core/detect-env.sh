@@ -171,8 +171,9 @@ _detect_wp_sites() {
     LSO_WP_SITES=()
 
     local parent docroot
-    # CyberPanel + generic layouts: /home/<domain>/public_html, /var/www/<site>(/html)
-    for parent in "$(_lso_fs /home)" "$(_lso_fs /var/www)"; do
+    # CyberPanel + generic layouts: /home/<domain>/public_html, /var/www/<site>(/html),
+    # plus default OLS vhost docroots ($LSWS_ROOT/<vhost>/html, e.g. Example/html)
+    for parent in "$(_lso_fs /home)" "$(_lso_fs /var/www)" "$LSO_LSWS_ROOT"; do
         [ -d "$parent" ] || continue
         for docroot in "$parent"/*/public_html "$parent"/*/html "$parent"/*; do
             [ -d "$docroot" ] || continue
