@@ -277,22 +277,49 @@ run_remote_analyze() {
             _az_check 8 woo "no public product found via Store API" skip ""
         fi
 
-        # Cart endpoints must never be cache HITs
-        _rm_request "${url}cart/" || true
+        # Cart endpoints must never be cache HITs. Only HTTP 200 counts —
+        # localized shops (e.g. /koszyk/) 404 on /cart/, and a CACHED 404 is
+        # harmless, not a poisoning signal (real-world false positive on a
+        # Polish production shop). Non-200 -> probe the localized URL via the
+        # homepage's cart link when discoverable.
+        local cart_status cart_probe_url="${url}cart/"
+        _rm_request "$cart_probe_url" || true
+        cart_status=$(tr -d '\r' < "$_RM_HDR_FILE" | awk 'NR==1 {print $2}')
+        if [ "$cart_status" != "200" ]; then
+            # Try to discover the localized cart URL from the homepage HTML
+            _rm_request "$url" || true
+            local discovered
+            discovered=$(grep -oE 'href="[^"]*"[^>]*class="[^"]*cart[^"]*"|class="[^"]*cart[^"]*"[^>]*href="[^"]*"' "$_RM_BODY_FILE" 2>/dev/null | \
+                sed -n 's/.*href="\([^"]*\)".*/\1/p' | grep -E "^${url%/}|^/" | head -1)
+            if [ -n "$discovered" ]; then
+                case "$discovered" in
+                    /*) discovered="${url%/}${discovered}" ;;
+                esac
+                cart_probe_url="$discovered"
+                _rm_request "$cart_probe_url" || true
+                cart_status=$(tr -d '\r' < "$_RM_HDR_FILE" | awk 'NR==1 {print $2}')
+            fi
+        fi
         cache_hdr=$(_rm_header "x-litespeed-cache")
-        if echo "$cache_hdr" | grep -qi "hit"; then
-            _az_check 8 woo "/cart/ served from cache — visitors can see each other's carts" danger \
+        if [ "$cart_status" = "200" ] && echo "$cache_hdr" | grep -qi "hit"; then
+            _az_check 8 woo "cart page (${cart_probe_url}) served from cache — visitors can see each other's carts" danger \
                 "NEVER cache the cart. Check LSCWP: WooCommerce integration active; cart page set in Woo settings; purge all after fixing"
-        else
+        elif [ "$cart_status" = "200" ]; then
             _az_check 8 woo "cart page not cache-served (${cache_hdr:-no cache header})" pass ""
+        else
+            _az_check 8 woo "cart page URL not found (HTTP ${cart_status} on ${cart_probe_url} — localized slug?)" skip ""
         fi
 
+        local co_status
         _rm_request "${url}checkout/" || true
+        co_status=$(tr -d '\r' < "$_RM_HDR_FILE" | awk 'NR==1 {print $2}')
         cache_hdr=$(_rm_header "x-litespeed-cache")
-        if echo "$cache_hdr" | grep -qi "hit"; then
+        if [ "$co_status" = "200" ] && echo "$cache_hdr" | grep -qi "hit"; then
             _az_check 4 woo "/checkout/ served from cache" danger "NEVER cache checkout — same fix as cart"
-        else
+        elif [ "$co_status" = "200" ]; then
             _az_check 4 woo "checkout not cache-served" pass ""
+        else
+            _az_check 4 woo "checkout URL not found (HTTP ${co_status} — localized slug?)" skip ""
         fi
 
         _rm_request "${url}?wc-ajax=get_refreshed_fragments" || true
@@ -304,17 +331,24 @@ run_remote_analyze() {
             _az_check 3 woo "wc-ajax not cache-served" pass ""
         fi
 
+        # Cart Store API cacheability — INDEPENDENT of product discovery so it
+        # always runs (the cache-rest=1 trap; reproduced on a live production
+        # shop). The endpoint is per-session data and must never be a cache HIT.
+        _rm_request "${url}?rest_route=/wc/store/v1/cart" || true
+        _rm_check_poison_signature "cart API" || true
+        cache_hdr=$(_rm_header "x-litespeed-cache")
+        if echo "$cache_hdr" | grep -qi "hit"; then
+            _az_check 4 woo "cart Store API served from cache — stale/foreign cart JSON to cookieless visitors" danger \
+                "set 'Cache REST API' OFF in LSCWP (Cache > Cache REST API) — the cart endpoint is per-session data"
+        else
+            _az_check 4 woo "cart Store API not cache-served (${cache_hdr:-no cache header})" pass ""
+        fi
+
         # Two-session isolation probe (anonymous, GET-only): session A adds the
         # discovered product to ITS OWN anonymous cart, session B must not see it.
         if [ -n "$prod_id" ] && [ -n "$prod_name" ]; then
             _rm_request "${url}?add-to-cart=${prod_id}" "$jar_a" || true
             _rm_request "${url}?rest_route=/wc/store/v1/cart" "$jar_a" || true
-            _rm_check_poison_signature "cart API" || true
-            # Cart JSON must never come from cache, hit or not (cache-rest trap)
-            if _rm_header "x-litespeed-cache" | grep -qi "hit"; then
-                _az_check 4 woo "cart Store API served from cache — stale/foreign cart JSON possible" danger \
-                    "set 'Cache REST API' OFF in LSCWP (Cache > Cache REST API) — the cart endpoint is per-session data"
-            fi
             local cart_a_has=false
             grep -q "$prod_name" "$_RM_BODY_FILE" 2>/dev/null && cart_a_has=true
             _rm_request "${url}?rest_route=/wc/store/v1/cart" "$jar_b" || true

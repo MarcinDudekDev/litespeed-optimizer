@@ -55,3 +55,13 @@
 ### Changed
 - woocommerce profile: cache-rest = 0 — with REST caching on, the Woo Store API cart endpoint can serve cached (stale/foreign) cart JSON to cookieless visitors; reproduced empirically in the E2E. Remote analyzer flags cart-API cache hits as DANGER
 - Version 0.5.0
+
+## [Unreleased] - pilot harness
+
+### Added
+- tests/pilot-restore.sh: restore an arbitrary WordPress export (files+DB) into a local OLS+MariaDB+Redis stack, URL search-replace to a .loc domain, wp-cli admin access. Client data stays local (gitignored)
+- tests/pilot-report.sh: drive analyze(before)/optimize/analyze(after)/benchmark/cart-isolation against the restore + generate the no-SSH export-profile artifact; writes docs/PILOT-REPORT.md (gitignored)
+- .gitignore: exclude staging exports, DB dumps, pilot reports, and generated .data artifacts (client-data safety)
+
+### Fixed
+- analyze --remote: cart-page check now requires HTTP 200 before flagging a cache hit (a CACHED 404 on /cart/ for localized shops like Polish /koszyk/ was a false-positive DANGER) and follows the homepage cart link to the localized slug; cart Store API cacheability check made independent of product discovery so it runs deterministically. Validated against the real production shop mltools.pl (cart-API cache-rest finding reproduced; localized cart correctly clears)

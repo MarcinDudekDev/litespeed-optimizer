@@ -6,3 +6,12 @@ venv/
 node_modules/
 .env
 *.log
+
+# Client/pilot data — NEVER commit (staging exports, DB dumps, reports with client data)
+/pilot-data/
+*.sql
+*.sql.gz
+wp-staging-export/
+PILOT-REPORT-*.md
+docs/PILOT-REPORT.md
+/docs/*.data
