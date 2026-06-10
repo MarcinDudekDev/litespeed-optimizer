@@ -71,3 +71,8 @@
 - analyze: runtime OPcache-pressure findings via wp-cli (opcache_get_status) — flags near-full pool, hit-rate <95%, and exhausted interned-strings buffer, each with a sizing FIX hint; LSO_OPCACHE_MB override to raise opcache.memory_consumption beyond the tier default when telemetry shows exhaustion
 - pilot-restore.sh: pins lsphp to the live-confirmed PHP version (default 8.3, LSO_PILOT_PHP override) and repoints the extprocessor at it
 - pilot-report.sh: plugin cache-safety/exclusions section; sets LSO_OPCACHE_MB=512 in staging to measure hit-rate headroom vs the live 128MB
+
+### Fixed (pilot hardening — real mltools.pl staging restore)
+- analyze: runtime OPcache block no longer aborts the whole audit under set -e when opcache_get_status returns null memory stats (the real CLI case: opcache.enable_cli=0). Non-numeric values are dropped before arithmetic; when stats are unreadable via CLI, analyze says so honestly and continues to the score. (Caught on the live restore — analyze was stopping before cache/security/score.)
+- pilot-restore.sh: NUL-safe DB-dump discovery (pipefail/SIGPIPE), MariaDB import with --max-allowed-packet=512M + non-strict sql-mode (matches prod; large serialized rows + STRICT mode were failing import), innodb-buffer-pool-size=256M (512M OOM-killed the DB container on a shared Docker VM), and .htaccess strip now also disables the prod force-HTTPS redirect (was 301-looping local http).
+- pilot-report.sh: probes via curl --resolve with the port in the Host header (WP canonical-redirects in a loop when Host omits the port that home_url carries); TTFB measured directly via --resolve.

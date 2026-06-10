@@ -210,6 +210,13 @@ run_analyze() {
             oc_free=$(echo "$oc_json" | sed -n 's/.*"free":\([0-9]*\).*/\1/p')
             oc_hr=$(echo "$oc_json" | sed -n 's/.*"hit_rate":\([0-9]*\).*/\1/p')   # integer part
             oc_interned=$(echo "$oc_json" | sed -n 's/.*"interned_free":\([0-9]*\).*/\1/p')
+            # Drop anything non-numeric so arithmetic below can't error under set -e
+            # (real-world wp eval can return notices/partial JSON; the pilot caught
+            # this — an unguarded $(( )) on an empty value aborted the whole audit).
+            case "$oc_used" in ''|*[!0-9]*) oc_used="" ;; esac
+            case "$oc_free" in ''|*[!0-9]*) oc_free="" ;; esac
+            case "$oc_hr" in ''|*[!0-9]*) oc_hr="" ;; esac
+            case "$oc_interned" in ''|*[!0-9]*) oc_interned="" ;; esac
 
             # Pool fill: free < 10% of (used+free) = pressure
             if [ -n "$oc_used" ] && [ -n "$oc_free" ] && [ "$((oc_used + oc_free))" -gt 0 ]; then
@@ -243,6 +250,13 @@ run_analyze() {
                 else
                     _az_check 3 opcache "interned strings buffer has headroom (${interned_kb}KB free)" pass ""
                 fi
+            fi
+
+            # opcache_get_status returns null memory stats under CLI when
+            # opcache.enable_cli=0 (the correct prod setting). Be honest that
+            # runtime numbers aren't readable here rather than silently passing.
+            if [ -z "$oc_used" ] && [ -z "$oc_hr" ] && [ "${JSON_OUTPUT:-false}" != true ]; then
+                log_info "  [opcache] runtime stats unreadable via CLI (opcache.enable_cli=0) — check the host's PHP/opcache status page for hit-rate & pool fill"
             fi
         fi
     fi

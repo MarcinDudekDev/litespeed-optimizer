@@ -23,8 +23,11 @@ LOC_DOMAIN="${1:-mltools.loc}"
 PORT="${2:-18090}"
 OLS="lso-pilot-ols"
 DOCROOT="/usr/local/lsws/Example/html"
-HOSTHDR="-H Host:${LOC_DOMAIN}"
-LOCAL="http://127.0.0.1:${PORT}"
+# Probe via the loc hostname WITH port: --resolve maps it to 127.0.0.1 and
+# curl sends Host: ${LOC_DOMAIN}:${PORT}, which must match WP's home_url or
+# WordPress canonical-redirects in a loop. (No /etc/hosts / sudo needed.)
+LOCAL="http://${LOC_DOMAIN}:${PORT}"
+RESOLVE="--resolve ${LOC_DOMAIN}:${PORT}:127.0.0.1"
 BASELINE_JSON="${LSO_PILOT_BASELINE:-/Users/cminds/claude-tmp/litespeed-optimizer/pilot/mltools-baseline.json}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -41,8 +44,9 @@ command -v docker &>/dev/null && docker ps --format '{{.Names}}' | grep -q "^${O
 
 run_tool() { docker exec "$OLS" bash -c "cd /opt/lso && ./litespeed-optimizer.sh $*"; }
 wp_in() { docker exec "$OLS" bash -c "cd $DOCROOT && wp --allow-root $*"; }
-# curl the local stack with the right Host header
-hit() { curl -s -m 15 $HOSTHDR "$@"; }
+# curl the local stack with the loc hostname resolved to 127.0.0.1
+# shellcheck disable=SC2086
+hit() { curl -s -m 20 $RESOLVE "$@"; }
 
 echo "=== Pilot report: ${LOC_DOMAIN} (local restore) ==="
 
@@ -119,11 +123,19 @@ if wp_in "plugin is-active woocommerce" >/dev/null 2>&1; then
     fi
 fi
 
-# 6. benchmark
-bench=$(LSO_DATA_DIR="$(mktemp -d)" LSO_BENCH_RUNS=6 LSO_BENCH_CART=0 \
-    "$ROOT_DIR/litespeed-optimizer.sh" benchmark "$LOCAL/" 2>&1 || true)
-TTFB_MED=$(echo "$bench" | sed -n 's/.*Median TTFB (warm): *\([0-9.]*\) ms.*/\1/p')
-[ -n "$TTFB_MED" ] && log_pass "benchmark warm median ${TTFB_MED}ms" || log_note "benchmark: $(echo "$bench" | tail -1)"
+# 6. benchmark — TTFB via --resolve (the vhost needs Host:${LOC_DOMAIN}:${PORT};
+#    the tool's benchmark binary, validated separately in the E2E, can't pass
+#    --resolve, so the pilot measures TTFB directly here). 6 warm samples, median.
+hit -o /dev/null "$LOCAL/"   # prime cache
+_ttfbs=$(for _i in 1 2 3 4 5 6; do
+    hit -o /dev/null -w '%{time_starttransfer}\n' "$LOCAL/" 2>/dev/null
+done | awk '{printf "%.0f\n", $1*1000}' | sort -n)
+TTFB_MED=$(echo "$_ttfbs" | awk '{a[NR]=$1} END{print a[int(NR/2)+1]}')
+if [ -n "$TTFB_MED" ]; then
+    log_pass "warm TTFB median ${TTFB_MED}ms (6 samples, cache hit)"
+else
+    log_note "TTFB measurement produced no samples"
+fi
 
 # 7. export-profile artifact for the no-SSH production delivery
 XP_OUT="${ROOT_DIR}/docs/mltools-woocommerce-profile.data"

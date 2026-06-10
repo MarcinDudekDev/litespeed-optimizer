@@ -914,6 +914,9 @@ case "$args" in
         #   healthy = plenty of headroom
         if [ "${WP_MOCK_OPCACHE:-healthy}" = "full" ]; then
             echo '{"used":131000000,"free":2000000,"wasted":500000,"hits":690,"misses":310,"hit_rate":69,"interned_free":1024,"keys":18000,"max_keys":20000}'
+        elif [ "${WP_MOCK_OPCACHE:-}" = "null" ]; then
+            # the real CLI case: opcache.enable_cli=0 -> null memory stats
+            echo '{"used":null,"free":null,"wasted":null,"hits":null,"misses":null,"hit_rate":null,"interned_free":null,"keys":null,"max_keys":null}'
         else
             echo '{"used":40000000,"free":228000000,"wasted":100000,"hits":995,"misses":5,"hit_rate":99,"interned_free":8388608,"keys":3000,"max_keys":50000}'
         fi
@@ -1700,6 +1703,23 @@ if echo "$oc_ok" | grep -qi "hit-rate 99%.*>=95" && echo "$oc_ok" | grep -qi "he
     log_pass "opcache: healthy runtime stats pass (no false alarm)"
 else
     log_fail "opcache: healthy stats wrongly flagged"
+fi
+
+# The real-world CLI case: null memory stats (enable_cli=0) must NOT crash the
+# audit (the pilot caught $(( )) aborting on null) — analyze must reach SCORE.
+oc_null=$(WP_MOCK_OPCACHE=null LSO_WP_BIN="$MOCK_WP" \
+    LSO_DATA_DIR="$OC_DATA" LSO_FS_ROOT="$OC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OC_FIX/etc/php.d" \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+if echo "$oc_null" | grep -q "SCORE:"; then
+    log_pass "opcache: null CLI stats don't crash analyze (reaches SCORE)"
+else
+    log_fail "opcache: null stats aborted analyze before SCORE"
+fi
+if echo "$oc_null" | grep -qi "runtime stats unreadable via CLI"; then
+    log_pass "opcache: null stats reported honestly (enable_cli=0 note)"
+else
+    log_fail "opcache: null-stats honest note missing"
 fi
 
 # LSO_OPCACHE_MB override flows into the opcache drop-in
