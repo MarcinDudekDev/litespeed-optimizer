@@ -118,7 +118,7 @@ in_ols "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq rsync curl re
 PHP_PIN="${LSO_PILOT_PHP:-83}"
 if ! in_ols "test -x /usr/local/lsws/lsphp${PHP_PIN}/bin/php"; then
     say "Installing lsphp${PHP_PIN} to match live PHP..."
-    in_ols "apt-get install -y -qq lsphp${PHP_PIN} lsphp${PHP_PIN}-common lsphp${PHP_PIN}-mysql >/dev/null 2>&1" || \
+    in_ols "apt-get install -y -qq lsphp${PHP_PIN} lsphp${PHP_PIN}-common lsphp${PHP_PIN}-mysql lsphp${PHP_PIN}-opcache >/dev/null 2>&1" || \
         warn "could not install lsphp${PHP_PIN} — falling back to bundled version"
 fi
 PHPBIN=$(in_ols "ls /usr/local/lsws/lsphp${PHP_PIN}/bin/php 2>/dev/null || ls /usr/local/lsws/lsphp*/bin/php 2>/dev/null | sort | tail -1" | tr -d '\r')

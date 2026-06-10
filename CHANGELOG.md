@@ -76,3 +76,9 @@
 - analyze: runtime OPcache block no longer aborts the whole audit under set -e when opcache_get_status returns null memory stats (the real CLI case: opcache.enable_cli=0). Non-numeric values are dropped before arithmetic; when stats are unreadable via CLI, analyze says so honestly and continues to the score. (Caught on the live restore — analyze was stopping before cache/security/score.)
 - pilot-restore.sh: NUL-safe DB-dump discovery (pipefail/SIGPIPE), MariaDB import with --max-allowed-packet=512M + non-strict sql-mode (matches prod; large serialized rows + STRICT mode were failing import), innodb-buffer-pool-size=256M (512M OOM-killed the DB container on a shared Docker VM), and .htaccess strip now also disables the prod force-HTTPS redirect (was 301-looping local http).
 - pilot-report.sh: probes via curl --resolve with the port in the Host header (WP canonical-redirects in a loop when Host omits the port that home_url carries); TTFB measured directly via --resolve.
+
+### Fixed (opcache deployment — pilot gap caught by main)
+- opcache feature: resolve the PHP ini scan dir from `php --ini` ("Scan for additional .ini files in:") instead of assuming conf.d/. OLS lsphp uses .../etc/php/<v>/mods-available/; cPanel ea-php uses php.d/ — the old code silently failed to deploy the drop-in. Fallbacks now try conf.d/php.d/mods-available.
+- opcache feature: detect whether the Zend opcache extension is actually loaded (`php -m`). If opcache.so exists in extension_dir but isn't loaded, the drop-in now adds `zend_extension=opcache.so`; if the .so is absent, tune-but-warn (directives are inert without the extension — found on lsphp83 which shipped without it). Template gained an @ZEND_EXTENSION_LINE@ slot.
+- pilot-restore.sh: install lsphp<v>-opcache so staging actually has the extension.
+- Verified live on the mltools.pl staging: opcache now loaded, memory_consumption=512 (vs prod 128), analyze reports "drop-in deployed / memory >= tier".
