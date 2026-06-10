@@ -35,8 +35,12 @@ ols_get() {
             { sub(/\r$/, "") }
             /^[[:space:]]*#/ { next }
             # block start at top level: "name {" or "name arg {"
+            # block may be given as "name" or "name arg" (e.g. "module cache")
             depth == 0 && /\{[[:space:]]*$/ {
-                if ($1 == block) inblock = 1
+                hdr = $0
+                sub(/^[[:space:]]+/, "", hdr)
+                sub(/[[:space:]]*\{[[:space:]]*$/, "", hdr)
+                if (hdr == block || $1 == block) inblock = 1
                 depth++
                 next
             }
@@ -81,8 +85,10 @@ ols_set() {
 
             if (!is_comment && line ~ /\{[[:space:]]*$/) {
                 if (depth == 0) {
+                    hdr = stripped
+                    sub(/[[:space:]]*\{[[:space:]]*$/, "", hdr)
                     split(stripped, parts, /[[:space:]]+/)
-                    if (parts[1] == block) inblock = 1
+                    if (hdr == block || parts[1] == block) inblock = 1
                 }
                 depth++
                 print line
@@ -219,4 +225,137 @@ ols_lint() {
         return 1
     fi
     return 0
+}
+
+# ols_get_env <file> <block> <VARNAME>
+# Print the value of a repeated `env VAR=value` line inside a block
+# (extprocessor blocks carry many env lines, so plain ols_get cannot address them).
+ols_get_env() {
+    local file="$1" block="$2" var="$3"
+    local line
+    line=$(awk -v block="$block" -v var="$var" '
+        { sub(/\r$/, "") }
+        /^[[:space:]]*#/ { next }
+        depth == 0 && /\{[[:space:]]*$/ {
+            hdr = $0
+            sub(/^[[:space:]]+/, "", hdr)
+            sub(/[[:space:]]*\{[[:space:]]*$/, "", hdr)
+            if (hdr == block || $1 == block) inblock = 1
+            depth++
+            next
+        }
+        /\{[[:space:]]*$/ { depth++; next }
+        /^[[:space:]]*\}/ {
+            if (depth > 0) depth--
+            if (depth == 0) inblock = 0
+            next
+        }
+        inblock && depth == 1 && $1 == "env" {
+            split($2, kv, "=")
+            if (kv[1] == var) {
+                sub(/^[^=]*=/, "", $2)
+                print $2
+                exit
+            }
+        }
+    ' "$file")
+
+    [ -n "$line" ] || return 1
+    echo "$line"
+}
+
+# ols_set_env <file> <block> <VARNAME> <value>
+# Set `env VAR=value` inside a block: replace the matching env line, or insert
+# before the block's closing brace. Creates the block if absent.
+ols_set_env() {
+    local file="$1" block="$2" var="$3" value="$4"
+    [ -f "$file" ] || return 1
+
+    local tmp
+    tmp=$(secure_mktemp "$(dirname "$file")/.lso-confedit.XXXXXX") || return 1
+
+    awk -v block="$block" -v var="$var" -v value="$value" '
+        BEGIN { done = 0; inblock = 0; depth = 0 }
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            stripped = line
+            sub(/^[[:space:]]+/, "", stripped)
+            is_comment = (stripped ~ /^#/)
+
+            if (!is_comment && line ~ /\{[[:space:]]*$/) {
+                if (depth == 0) {
+                    hdr = stripped
+                    sub(/[[:space:]]*\{[[:space:]]*$/, "", hdr)
+                    split(stripped, parts, /[[:space:]]+/)
+                    if (hdr == block || parts[1] == block) inblock = 1
+                }
+                depth++
+                print line
+                next
+            }
+            if (!is_comment && stripped ~ /^\}/) {
+                if (inblock && depth == 1 && !done) {
+                    printf "  %-30s %s=%s\n", "env", var, value
+                    done = 1
+                }
+                if (depth > 0) depth--
+                if (depth == 0) inblock = 0
+                print line
+                next
+            }
+            if (!is_comment && inblock && depth == 1) {
+                split(stripped, kv, /[[:space:]]+/)
+                if (kv[1] == "env") {
+                    split(kv[2], ev, "=")
+                    if (ev[1] == var && !done) {
+                        match(line, /^[[:space:]]*/)
+                        indent = substr(line, 1, RLENGTH)
+                        printf "%s%-30s %s=%s\n", indent, "env", var, value
+                        done = 1
+                        next
+                    }
+                }
+            }
+            print line
+        }
+        END {
+            if (!done) {
+                print ""
+                print block " {"
+                printf "  %-30s %s=%s\n", "env", var, value
+                print "}"
+            }
+        }
+    ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+    copy_file_permissions "$file" "$tmp" 2>/dev/null || true
+    copy_file_ownership "$file" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$file"
+}
+
+################################################################################
+# Dry-Run-Aware Wrappers (used by feature modules)
+################################################################################
+
+# lso_conf_set <file> <block> <key> <value>
+lso_conf_set() {
+    local file="$1" block="$2" key="$3" value="$4"
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] Would set ${block}.${key} = ${value} in ${file}"
+        return 0
+    fi
+    ols_set "$file" "$block" "$key" "$value"
+    log_info "Set ${block}.${key} = ${value}"
+}
+
+# lso_conf_set_env <file> <block> <VAR> <value>
+lso_conf_set_env() {
+    local file="$1" block="$2" var="$3" value="$4"
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] Would set ${block} env ${var}=${value} in ${file}"
+        return 0
+    fi
+    ols_set_env "$file" "$block" "$var" "$value"
+    log_info "Set ${block} env ${var}=${value}"
 }

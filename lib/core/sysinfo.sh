@@ -197,6 +197,9 @@ lso_children() {
 
 # Sanity assertion string for analyze/optimize output
 # lso_ram_budget_check <ram_mb> <cores> [rss_mb] → "OK" or "OVERCOMMIT"
+# Invariant matches the lso_children formula: everything planned (OS reserve,
+# InnoDB, Redis, OPcache, 150MB lsws+misc, PHP children) must fit inside RAM.
+# (The formula already reserves max(12%, 512MB) for the OS as headroom.)
 lso_ram_budget_check() {
     local ram=$1 cores=$2 rss=${3:-80}
     local reserve=$(( ram*12/100 )); [ "$reserve" -lt 512 ] && reserve=512
@@ -205,12 +208,11 @@ lso_ram_budget_check() {
     redis=$(lso_redis_mb "$ram")
     opcache=$(lso_opcache_mb "$ram")
     children=$(lso_children "$ram" "$cores" "$rss")
-    local total=$(( reserve + pool + redis + opcache + children * rss ))
-    local limit=$(( ram * 9 / 10 ))
-    if [ "$total" -le "$limit" ]; then
-        echo "OK (${total}MB planned <= ${limit}MB = 90% of ${ram}MB)"
+    local total=$(( reserve + pool + redis + opcache + 150 + children * rss ))
+    if [ "$total" -le "$ram" ]; then
+        echo "OK (${total}MB planned <= ${ram}MB RAM, incl. ${reserve}MB OS reserve)"
     else
-        echo "OVERCOMMIT (${total}MB planned > ${limit}MB = 90% of ${ram}MB)"
+        echo "OVERCOMMIT (${total}MB planned > ${ram}MB RAM)"
     fi
 }
 

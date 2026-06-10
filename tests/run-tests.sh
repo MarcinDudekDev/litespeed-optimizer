@@ -36,6 +36,7 @@ ALL_SCRIPTS=(
     "${OPTIMIZER}"
     "${ROOT_DIR}/lib/registry.sh"
     "${ROOT_DIR}/lib/core"/*.sh
+    "${ROOT_DIR}/lib/features"/*.sh
     "${ROOT_DIR}/litespeed-optimizer-lib"/*.sh
 )
 
@@ -625,6 +626,234 @@ if [ "$leftover" = "0" ]; then
     log_pass "no temp files left after transactions"
 else
     log_fail "$leftover temp files left behind"
+fi
+
+################################################################################
+# SECTION 10: confedit env primitives ("env VAR=value" lines, "name arg" blocks)
+################################################################################
+log_section "confedit env Primitives"
+
+ENV_CONF="${TEST_TMP}/env.conf"
+cp "${CONFIGS_DIR}/plain-ols/usr/local/lsws/conf/httpd_config.conf" "$ENV_CONF"
+
+val=$(ols_get_env "$ENV_CONF" "extprocessor lsphp" PHP_LSAPI_CHILDREN || echo "FAIL")
+if [ "$val" = "10" ]; then
+    log_pass "ols_get_env reads env line value"
+else
+    log_fail "ols_get_env: got '$val'"
+fi
+
+ols_set_env "$ENV_CONF" "extprocessor lsphp" PHP_LSAPI_CHILDREN 25
+ols_set_env "$ENV_CONF" "extprocessor lsphp" LSAPI_NEW_VAR hello
+val=$(ols_get_env "$ENV_CONF" "extprocessor lsphp" PHP_LSAPI_CHILDREN || echo "FAIL")
+val2=$(ols_get_env "$ENV_CONF" "extprocessor lsphp" LSAPI_NEW_VAR || echo "FAIL")
+env_count=$(grep -c "PHP_LSAPI_CHILDREN=" "$ENV_CONF")
+if [ "$val" = "25" ] && [ "$val2" = "hello" ] && [ "$env_count" = "1" ]; then
+    log_pass "ols_set_env replaces and inserts env lines"
+else
+    log_fail "ols_set_env: replace='$val' insert='$val2' count=$env_count"
+fi
+
+# "name arg" block addressing
+val=$(ols_get "$ENV_CONF" "module cache" internal || echo "FAIL")
+if [ "$val" = "1" ]; then
+    log_pass "ols_get addresses 'module cache' block by name+arg"
+else
+    log_fail "ols_get 'module cache': got '$val'"
+fi
+if ols_lint "$ENV_CONF" 2>/dev/null; then
+    log_pass "config lints clean after env edits"
+else
+    log_fail "config broken after env edits"
+fi
+
+################################################################################
+# SECTION 11: Golden Config Tests (optimize per RAM tier)
+################################################################################
+log_section "Golden Config Tests"
+
+GOLDEN_DIR="${SCRIPT_DIR}/golden"
+
+# run_golden_tier <ram_mb> <cores> <tier>
+run_golden_tier() {
+    local ram="$1" cores="$2" tier="$3"
+    local fix="${TEST_TMP}/golden-${tier}"
+    local data="${TEST_TMP}/golden-data-${tier}"
+    mkdir -p "$data"
+    cp -R "${CONFIGS_DIR}/plain-ols" "$fix"
+    mkdir -p "$fix/etc/php.d"
+
+    if ! LSO_DATA_DIR="$data" LSO_FS_ROOT="$fix" LSO_RAM_MB="$ram" LSO_CORES="$cores" \
+         LSO_PHP_INI_SCAN_DIR="$fix/etc/php.d" LSO_SKIP_RESTART=1 \
+         "${OPTIMIZER}" optimize --force --quiet >/dev/null 2>&1; then
+        log_fail "golden ${tier}: optimize failed"
+        return
+    fi
+
+    local got_conf="$fix/usr/local/lsws/conf/httpd_config.conf"
+    local got_ini="$fix/etc/php.d/99-litespeed-optimizer-opcache.ini"
+
+    if diff "${GOLDEN_DIR}/plain-ols-${tier}/httpd_config.conf" "$got_conf" >/dev/null 2>&1; then
+        log_pass "golden ${tier}: httpd_config.conf matches"
+    else
+        log_fail "golden ${tier}: httpd_config.conf differs"
+        diff "${GOLDEN_DIR}/plain-ols-${tier}/httpd_config.conf" "$got_conf" 2>&1 | head -5
+    fi
+
+    if diff "${GOLDEN_DIR}/plain-ols-${tier}/opcache.ini" "$got_ini" >/dev/null 2>&1; then
+        log_pass "golden ${tier}: opcache.ini matches"
+    else
+        log_fail "golden ${tier}: opcache.ini differs"
+    fi
+
+    # Invariant: maxConns == PHP_LSAPI_CHILDREN (explicit assertion per SPEC)
+    local maxconns children
+    maxconns=$(awk '/^extprocessor lsphp \{/,/^\}/' "$got_conf" | awk '$1=="maxConns" {print $2}')
+    children=$(awk '/^extprocessor lsphp \{/,/^\}/' "$got_conf" | grep 'PHP_LSAPI_CHILDREN=' | sed 's/.*=//')
+    if [ -n "$maxconns" ] && [ "$maxconns" = "$children" ]; then
+        log_pass "golden ${tier}: maxConns == PHP_LSAPI_CHILDREN (${maxconns})"
+    else
+        log_fail "golden ${tier}: invariant broken: maxConns='$maxconns' children='$children'"
+    fi
+
+    # Danger guard: enableCache must be 0 and never 1 at server level
+    if grep -E '^[[:space:]]*enableCache[[:space:]]+1' "$got_conf" >/dev/null 2>&1; then
+        log_fail "golden ${tier}: enableCache 1 found at server level (DANGER)"
+    else
+        log_pass "golden ${tier}: no server-level enableCache 1"
+    fi
+    if awk '/^module cache \{/,/^\}/' "$got_conf" | grep -E 'enableCache[[:space:]]+0' >/dev/null; then
+        log_pass "golden ${tier}: module cache enableCache 0 present"
+    else
+        log_fail "golden ${tier}: module cache enableCache 0 missing"
+    fi
+
+    # Config still grammatically valid
+    if ols_lint "$got_conf" 2>/dev/null; then
+        log_pass "golden ${tier}: result passes ols_lint"
+    else
+        log_fail "golden ${tier}: result fails ols_lint"
+    fi
+}
+
+run_golden_tier 1024 1 1g
+run_golden_tier 2048 2 2g
+run_golden_tier 4096 4 4g
+run_golden_tier 8192 8 8g
+
+# Tier-specific spot checks
+if grep -q "LSAPI_PGRP_MAX_IDLE" "${GOLDEN_DIR}/plain-ols-1g/httpd_config.conf"; then
+    log_fail "1g golden should NOT set LSAPI_PGRP_MAX_IDLE"
+else
+    log_pass "1g golden omits LSAPI_PGRP_MAX_IDLE (set only >=2GB)"
+fi
+if grep -q "LSAPI_PGRP_MAX_IDLE=3600" "${GOLDEN_DIR}/plain-ols-4g/httpd_config.conf"; then
+    log_pass "4g golden sets LSAPI_PGRP_MAX_IDLE=3600"
+else
+    log_fail "4g golden missing LSAPI_PGRP_MAX_IDLE"
+fi
+if grep -q "LSAPI_AVOID_FORK=0" "${GOLDEN_DIR}/plain-ols-1g/httpd_config.conf" && \
+   grep -q "LSAPI_AVOID_FORK=200M" "${GOLDEN_DIR}/plain-ols-2g/httpd_config.conf" && \
+   grep -q "LSAPI_AVOID_FORK=500M" "${GOLDEN_DIR}/plain-ols-4g/httpd_config.conf" && \
+   grep -q "LSAPI_AVOID_FORK=1" "${GOLDEN_DIR}/plain-ols-8g/httpd_config.conf"; then
+    log_pass "AVOID_FORK tier progression 0/200M/500M/1"
+else
+    log_fail "AVOID_FORK tier progression wrong"
+fi
+
+################################################################################
+# SECTION 12: Dry-Run Safety + Enterprise Read-Only
+################################################################################
+log_section "Dry-Run / Enterprise Safety"
+
+# --dry-run must not mutate anything
+DR_FIX="${TEST_TMP}/dryrun-fix"
+DR_DATA="${TEST_TMP}/dryrun-data"
+mkdir -p "$DR_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$DR_FIX"
+mkdir -p "$DR_FIX/etc/php.d"
+sum_before=$(file_checksum "$DR_FIX/usr/local/lsws/conf/httpd_config.conf")
+dr_out=$(LSO_DATA_DIR="$DR_DATA" LSO_FS_ROOT="$DR_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$DR_FIX/etc/php.d" LSO_SKIP_RESTART=1 \
+    "${OPTIMIZER}" optimize --dry-run 2>&1 || true)
+sum_after=$(file_checksum "$DR_FIX/usr/local/lsws/conf/httpd_config.conf")
+if [ "$sum_before" = "$sum_after" ]; then
+    log_pass "--dry-run leaves main config untouched"
+else
+    log_fail "--dry-run MODIFIED the main config"
+fi
+if [ ! -f "$DR_FIX/etc/php.d/99-litespeed-optimizer-opcache.ini" ]; then
+    log_pass "--dry-run does not deploy opcache ini"
+else
+    log_fail "--dry-run deployed opcache ini"
+fi
+if echo "$dr_out" | grep -q "\[DRY RUN\] Would set"; then
+    log_pass "--dry-run prints Would-set preview"
+else
+    log_fail "--dry-run preview output missing"
+fi
+backup_count=$(ls -1 "$DR_DATA/backups" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$backup_count" = "0" ]; then
+    log_pass "--dry-run creates no backup"
+else
+    log_fail "--dry-run created a backup"
+fi
+
+# Enterprise: XML never touched; LSPHP_Workers goes to Apache include
+ENT_FIX="${TEST_TMP}/ent-fix"
+ENT_DATA="${TEST_TMP}/ent-data"
+mkdir -p "$ENT_DATA"
+cp -R "${CONFIGS_DIR}/cpanel-enterprise" "$ENT_FIX"
+mkdir -p "$ENT_FIX/etc/php.d"
+xml_before=$(file_checksum "$ENT_FIX/usr/local/lsws/conf/httpd_config.xml")
+ent_out=$(LSO_DATA_DIR="$ENT_DATA" LSO_FS_ROOT="$ENT_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$ENT_FIX/etc/php.d" LSO_SKIP_RESTART=1 \
+    "${OPTIMIZER}" optimize --force 2>&1 || true)
+xml_after=$(file_checksum "$ENT_FIX/usr/local/lsws/conf/httpd_config.xml")
+if [ "$xml_before" = "$xml_after" ]; then
+    log_pass "Enterprise: httpd_config.xml never modified"
+else
+    log_fail "Enterprise: httpd_config.xml WAS MODIFIED (forbidden)"
+fi
+if grep -q "LSPHP_Workers" "$ENT_FIX/etc/apache2/conf.d/includes/pre_main_global.conf" 2>/dev/null; then
+    log_pass "Enterprise: LSPHP_Workers written to Apache include"
+else
+    log_fail "Enterprise: Apache include missing LSPHP_Workers"
+fi
+if echo "$ent_out" | grep -q "report-only"; then
+    log_pass "Enterprise: tuning{} reported, not written"
+else
+    log_fail "Enterprise: report-only message missing"
+fi
+if [ -f "$ENT_FIX/etc/php.d/99-litespeed-optimizer-opcache.ini" ]; then
+    log_pass "Enterprise: opcache drop-in deployed"
+else
+    log_fail "Enterprise: opcache drop-in missing"
+fi
+
+# Idempotency: second apply on the 4g tree must produce identical config
+IDEM_DATA="${TEST_TMP}/idem-data"
+mkdir -p "$IDEM_DATA"
+idem_fix="${TEST_TMP}/golden-4g"
+sum1=$(file_checksum "$idem_fix/usr/local/lsws/conf/httpd_config.conf")
+LSO_DATA_DIR="$IDEM_DATA" LSO_FS_ROOT="$idem_fix" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$idem_fix/etc/php.d" LSO_SKIP_RESTART=1 \
+    "${OPTIMIZER}" optimize --force --quiet >/dev/null 2>&1 || true
+sum2=$(file_checksum "$idem_fix/usr/local/lsws/conf/httpd_config.conf")
+if [ "$sum1" = "$sum2" ]; then
+    log_pass "optimize is idempotent (second run = no diff)"
+else
+    log_fail "optimize not idempotent"
+fi
+
+# status reports applied features after optimize
+status_out=$(LSO_DATA_DIR="$IDEM_DATA" LSO_FS_ROOT="$idem_fix" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$idem_fix/etc/php.d" "${OPTIMIZER}" status 2>&1 || true)
+applied_n=$(echo "$status_out" | grep -c "\[applied\]" || true)
+if [ "$applied_n" -ge 4 ]; then
+    log_pass "status shows 4 features applied after optimize"
+else
+    log_fail "status applied count wrong: $applied_n"
 fi
 
 ################################################################################
