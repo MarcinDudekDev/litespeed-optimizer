@@ -15,3 +15,5 @@ wp-staging-export/
 PILOT-REPORT-*.md
 docs/PILOT-REPORT.md
 /docs/*.data
+/docs/*-profile.README.md
+/docs/mltools-*
