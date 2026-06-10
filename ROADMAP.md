@@ -9,6 +9,7 @@ Canonical spec: docs/research/SPEC.md
 - [x] Phase 4 — security feature, scored analyze audit (0-100), benchmark
 
 ## v0.2+
+- Web-context OPcache probe: runtime hit-rate/pool-fill is web-SAPI-only (CLI has opcache.enable_cli=0), so `analyze` can't read it via wp-cli. Add an opt-in probe — drop a random-named one-shot PHP status file in the docroot, fetch over HTTP, parse opcache_get_status, delete — to measure the real hit-rate delta (pilot confirmed pool SIZE but not runtime stats).
 - ModSecurity/OWASP CRS install, reCAPTCHA config, QUIC.cloud onboarding
 - DirectAdmin/RunCloud server-config write paths
 - fail2ban, honeypot/tarpit, bad-bot blocker (nginx-optimizer parity)
