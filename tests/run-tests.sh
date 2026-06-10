@@ -683,8 +683,9 @@ run_golden_tier() {
     cp -R "${CONFIGS_DIR}/plain-ols" "$fix"
     mkdir -p "$fix/etc/php.d"
 
+    # LSO_WP_BIN=/nonexistent: keep golden runs hermetic from any host wp-cli
     if ! LSO_DATA_DIR="$data" LSO_FS_ROOT="$fix" LSO_RAM_MB="$ram" LSO_CORES="$cores" \
-         LSO_PHP_INI_SCAN_DIR="$fix/etc/php.d" LSO_SKIP_RESTART=1 \
+         LSO_PHP_INI_SCAN_DIR="$fix/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
          "${OPTIMIZER}" optimize --force --quiet >/dev/null 2>&1; then
         log_fail "golden ${tier}: optimize failed"
         return
@@ -774,7 +775,7 @@ cp -R "${CONFIGS_DIR}/plain-ols" "$DR_FIX"
 mkdir -p "$DR_FIX/etc/php.d"
 sum_before=$(file_checksum "$DR_FIX/usr/local/lsws/conf/httpd_config.conf")
 dr_out=$(LSO_DATA_DIR="$DR_DATA" LSO_FS_ROOT="$DR_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
-    LSO_PHP_INI_SCAN_DIR="$DR_FIX/etc/php.d" LSO_SKIP_RESTART=1 \
+    LSO_PHP_INI_SCAN_DIR="$DR_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
     "${OPTIMIZER}" optimize --dry-run 2>&1 || true)
 sum_after=$(file_checksum "$DR_FIX/usr/local/lsws/conf/httpd_config.conf")
 if [ "$sum_before" = "$sum_after" ]; then
@@ -807,7 +808,7 @@ cp -R "${CONFIGS_DIR}/cpanel-enterprise" "$ENT_FIX"
 mkdir -p "$ENT_FIX/etc/php.d"
 xml_before=$(file_checksum "$ENT_FIX/usr/local/lsws/conf/httpd_config.xml")
 ent_out=$(LSO_DATA_DIR="$ENT_DATA" LSO_FS_ROOT="$ENT_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
-    LSO_PHP_INI_SCAN_DIR="$ENT_FIX/etc/php.d" LSO_SKIP_RESTART=1 \
+    LSO_PHP_INI_SCAN_DIR="$ENT_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
     "${OPTIMIZER}" optimize --force 2>&1 || true)
 xml_after=$(file_checksum "$ENT_FIX/usr/local/lsws/conf/httpd_config.xml")
 if [ "$xml_before" = "$xml_after" ]; then
@@ -837,7 +838,7 @@ mkdir -p "$IDEM_DATA"
 idem_fix="${TEST_TMP}/golden-4g"
 sum1=$(file_checksum "$idem_fix/usr/local/lsws/conf/httpd_config.conf")
 LSO_DATA_DIR="$IDEM_DATA" LSO_FS_ROOT="$idem_fix" LSO_RAM_MB=4096 LSO_CORES=4 \
-    LSO_PHP_INI_SCAN_DIR="$idem_fix/etc/php.d" LSO_SKIP_RESTART=1 \
+    LSO_PHP_INI_SCAN_DIR="$idem_fix/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
     "${OPTIMIZER}" optimize --force --quiet >/dev/null 2>&1 || true
 sum2=$(file_checksum "$idem_fix/usr/local/lsws/conf/httpd_config.conf")
 if [ "$sum1" = "$sum2" ]; then
@@ -848,13 +849,286 @@ fi
 
 # status reports applied features after optimize
 status_out=$(LSO_DATA_DIR="$IDEM_DATA" LSO_FS_ROOT="$idem_fix" LSO_RAM_MB=4096 LSO_CORES=4 \
-    LSO_PHP_INI_SCAN_DIR="$idem_fix/etc/php.d" "${OPTIMIZER}" status 2>&1 || true)
+    LSO_PHP_INI_SCAN_DIR="$idem_fix/etc/php.d" LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" status 2>&1 || true)
 applied_n=$(echo "$status_out" | grep -c "\[applied\]" || true)
 if [ "$applied_n" -ge 4 ]; then
     log_pass "status shows 4 features applied after optimize"
 else
     log_fail "status applied count wrong: $applied_n"
 fi
+
+################################################################################
+# SECTION 13: LSCWP / WooCommerce (mock wp-cli — no real WP needed)
+################################################################################
+log_section "LSCWP / WooCommerce Tests"
+
+# Mock wp-cli: logs every invocation, answers from WP_MOCK_* env vars
+MOCK_WP="${TEST_TMP}/bin/wp"
+mkdir -p "${TEST_TMP}/bin"
+cat > "$MOCK_WP" <<'MOCKEOF'
+#!/bin/bash
+# wp-cli mock for litespeed-optimizer tests
+echo "$@" >> "${WP_MOCK_LOG:-/dev/null}"
+args="$*"
+case "$args" in
+    *"plugin get litespeed-cache --field=version"*)
+        if [ "${WP_MOCK_NO_LSCWP:-0}" = "1" ] && [ ! -f "${WP_MOCK_STATE:-/nonexistent}.installed" ]; then
+            exit 1
+        fi
+        echo "${WP_MOCK_LSCWP_VERSION:-6.5.2}"
+        exit 0 ;;
+    *"plugin install litespeed-cache"*)
+        [ -n "${WP_MOCK_STATE:-}" ] && touch "${WP_MOCK_STATE}.installed"
+        exit 0 ;;
+    *"plugin is-active litespeed-cache"*)
+        exit 0 ;;
+    *"plugin is-active woocommerce"*)
+        exit "${WP_MOCK_NO_WOO:-0}" ;;
+    *"plugin is-active"*)
+        exit 1 ;;
+    *"plugin update litespeed-cache"*)
+        exit 0 ;;
+    *"option get siteurl"*)
+        echo "http://example.test"
+        exit 0 ;;
+    *"litespeed-option get cache-exc_cookies"*)
+        echo "${WP_MOCK_EXC_COOKIES:-}"
+        exit 0 ;;
+    *"litespeed-option get cache-vary_cookies"*)
+        echo "${WP_MOCK_VARY_COOKIES:-}"
+        exit 0 ;;
+    *"litespeed-option get cache-ttl_pub"*)
+        echo "${WP_MOCK_TTL_PUB:-604800}"
+        exit 0 ;;
+    *"litespeed-option get crawler"*)
+        echo "1"
+        exit 0 ;;
+    *"litespeed-option export"*)
+        echo '{"mock":"export"}'
+        exit 0 ;;
+    *)
+        exit 0 ;;
+esac
+MOCKEOF
+chmod +x "$MOCK_WP"
+
+# wp_fix_dir <profile> <logfile> — deterministic fixture dir for a run
+# (run_wp_optimize is called via $(...), so it cannot export variables)
+wp_fix_dir() {
+    echo "${TEST_TMP}/wp-$1-$(basename "$2" .log)"
+}
+
+# run_wp_optimize <fixture> <profile> <logfile> [extra env as VAR=val ...]
+run_wp_optimize() {
+    local fixture="$1" profile="$2" wplog="$3"
+    shift 3
+    local fix
+    fix=$(wp_fix_dir "$profile" "$wplog")
+    local data="${fix}-data"
+    rm -rf "$fix" "$data"
+    mkdir -p "$data"
+    cp -R "${CONFIGS_DIR}/${fixture}" "$fix"
+    mkdir -p "$fix/etc/php.d"
+    : > "$wplog"
+    env "$@" WP_MOCK_LOG="$wplog" LSO_WP_BIN="$MOCK_WP" \
+        LSO_DATA_DIR="$data" LSO_FS_ROOT="$fix" LSO_RAM_MB=4096 LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$fix/etc/php.d" LSO_SKIP_RESTART=1 \
+        "${OPTIMIZER}" optimize --profile "$profile" --force 2>&1
+}
+
+# --- WooCommerce profile on OLS ---
+WPLOG="${TEST_TMP}/woo-ols.log"
+woo_out=$(run_wp_optimize plain-ols woocommerce "$WPLOG" WP_MOCK_NO_WOO=0 || true)
+
+if grep -q "litespeed-option set cache-ttl_pub 604800" "$WPLOG"; then
+    log_pass "LSCWP: cache-ttl_pub 604800 applied"
+else
+    log_fail "LSCWP: cache-ttl_pub not applied"
+fi
+if grep -q "litespeed-option set cache-ttl_priv 1800" "$WPLOG"; then
+    log_pass "LSCWP: cache-ttl_priv 1800 applied"
+else
+    log_fail "LSCWP: cache-ttl_priv not applied"
+fi
+if grep -q "litespeed-option set cache-stale 1" "$WPLOG"; then
+    log_pass "LSCWP: serve stale ON"
+else
+    log_fail "LSCWP: serve stale not applied"
+fi
+if grep -q "litespeed-option set guest-optm 0" "$WPLOG"; then
+    log_pass "LSCWP: guest optimization OFF"
+else
+    log_fail "LSCWP: guest-optm not applied"
+fi
+for danger_opt in "optm-css_comb 0" "optm-ucss 0" "optm-js_defer 0" "optm-js_comb 0"; do
+    if grep -q "litespeed-option set ${danger_opt}" "$WPLOG"; then
+        log_pass "LSCWP woo: ${danger_opt} (combine/UCSS/defer off)"
+    else
+        log_fail "LSCWP woo: ${danger_opt} missing"
+    fi
+done
+if grep -q "litespeed-option set debug 0" "$WPLOG"; then
+    log_pass "LSCWP: debug log OFF"
+else
+    log_fail "LSCWP: debug not disabled"
+fi
+if grep -q "litespeed-option set crawler-role_sims " "$WPLOG"; then
+    log_pass "LSCWP: crawler role simulation cleared"
+else
+    log_fail "LSCWP: crawler-role_sims not cleared"
+fi
+# Redis present in plain-ols fixture -> object cache wired with lifetime 600
+if grep -q "litespeed-option set object 1" "$WPLOG" && \
+   grep -q "litespeed-option set object-life 600" "$WPLOG" && \
+   grep -q "litespeed-option set object-kind 1" "$WPLOG"; then
+    log_pass "LSCWP: Redis object cache wired (lifetime 600)"
+else
+    log_fail "LSCWP: object cache wiring wrong"
+fi
+# OLS: ESI must be 0 + warning printed
+if grep -q "litespeed-option set esi 1" "$WPLOG"; then
+    log_fail "OLS: ESI was enabled (OLS has no ESI engine!)"
+else
+    log_pass "OLS: ESI not enabled"
+fi
+if echo "$woo_out" | grep -qi "NO ESI engine"; then
+    log_pass "OLS: ESI warning printed with QUIC.cloud fallback"
+else
+    log_fail "OLS: ESI warning missing"
+fi
+if grep -q "litespeed-purge all" "$WPLOG"; then
+    log_pass "LSCWP: purge all after apply"
+else
+    log_fail "LSCWP: purge missing"
+fi
+if grep -q "litespeed-crawler enable" "$WPLOG"; then
+    log_pass "Woo: crawler enabled"
+else
+    log_fail "Woo: crawler not enabled"
+fi
+# .log access block in site .htaccess
+if grep -q "RewriteRule \\\\.log" "$(wp_fix_dir woocommerce "$WPLOG")/home/example.com/public_html/.htaccess" 2>/dev/null; then
+    log_pass "Hardening: *.log access blocked via rewrite in .htaccess"
+else
+    log_fail "Hardening: .log block missing in .htaccess"
+fi
+
+# --- ESI ON for Enterprise ---
+WPLOG_ENT="${TEST_TMP}/woo-ent.log"
+ent_out=$(run_wp_optimize cpanel-enterprise woocommerce "$WPLOG_ENT" WP_MOCK_NO_WOO=0 || true)
+if grep -q "litespeed-option set esi 1" "$WPLOG_ENT" && \
+   grep -q "litespeed-option set esi-cache_admbar 1" "$WPLOG_ENT"; then
+    log_pass "Enterprise: ESI + admin-bar hole punching enabled"
+else
+    log_fail "Enterprise: ESI not enabled"
+fi
+
+# --- Vary-cookie danger check ---
+WPLOG_VARY="${TEST_TMP}/woo-vary.log"
+vary_out=$(run_wp_optimize plain-ols woocommerce "$WPLOG_VARY" \
+    WP_MOCK_NO_WOO=0 WP_MOCK_EXC_COOKIES="woocommerce_cart_hash;woocommerce_items_in_cart" || true)
+if echo "$vary_out" | grep -q "woocommerce_items_in_cart found in Do-Not-Cache"; then
+    log_pass "Danger check: items_in_cart in do-not-cache cookies flagged"
+else
+    log_fail "Danger check: items_in_cart misconfig NOT flagged"
+fi
+
+# --- CVE version gate ---
+WPLOG_CVE="${TEST_TMP}/woo-cve.log"
+cve_out=$(run_wp_optimize plain-ols wordpress "$WPLOG_CVE" WP_MOCK_LSCWP_VERSION=6.3.0 || true)
+if echo "$cve_out" | grep -q "CVE-2024-28000"; then
+    log_pass "CVE gate: old LSCWP version flagged"
+else
+    log_fail "CVE gate: old version NOT flagged"
+fi
+if grep -q "plugin update litespeed-cache" "$WPLOG_CVE"; then
+    log_pass "CVE gate: plugin update attempted"
+else
+    log_fail "CVE gate: no update attempted"
+fi
+
+# --- Plugin install when missing ---
+WPLOG_INST="${TEST_TMP}/woo-inst.log"
+inst_out=$(run_wp_optimize plain-ols wordpress "$WPLOG_INST" \
+    WP_MOCK_NO_LSCWP=1 WP_MOCK_STATE="${TEST_TMP}/instate" || true)
+if grep -q "plugin install litespeed-cache --activate" "$WPLOG_INST"; then
+    log_pass "LSCWP installed+activated when missing"
+else
+    log_fail "LSCWP install not attempted"
+fi
+
+# --- Option export backup before changes ---
+if grep -q "litespeed-option export" "$WPLOG"; then
+    log_pass "LSCWP options exported before profile apply"
+else
+    log_fail "LSCWP export backup missing"
+fi
+
+# --- Dry-run: no mutating wp calls ---
+DR3_FIX="${TEST_TMP}/wp-dryrun"
+DR3_DATA="${TEST_TMP}/wp-dryrun-data"
+rm -rf "$DR3_FIX" "$DR3_DATA"
+mkdir -p "$DR3_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$DR3_FIX"
+mkdir -p "$DR3_FIX/etc/php.d"
+WPLOG_DR="${TEST_TMP}/woo-dr.log"
+: > "$WPLOG_DR"
+WP_MOCK_LOG="$WPLOG_DR" LSO_WP_BIN="$MOCK_WP" \
+    LSO_DATA_DIR="$DR3_DATA" LSO_FS_ROOT="$DR3_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$DR3_FIX/etc/php.d" LSO_SKIP_RESTART=1 \
+    "${OPTIMIZER}" optimize --profile woocommerce --dry-run >/dev/null 2>&1 || true
+if grep -qE "litespeed-option set|plugin install|plugin update|litespeed-purge" "$WPLOG_DR"; then
+    log_fail "--dry-run made mutating wp-cli calls"
+else
+    log_pass "--dry-run makes no mutating wp-cli calls"
+fi
+ht_count=$(grep -c "litespeed-optimizer logblock" "$DR3_FIX/home/example.com/public_html/.htaccess" 2>/dev/null || true)
+if [ "${ht_count:-0}" = "0" ]; then
+    log_pass "--dry-run leaves .htaccess untouched"
+else
+    log_fail "--dry-run modified .htaccess"
+fi
+
+# --- Golden profile payloads (rendered with fixed placeholder values) ---
+log_section "Golden Profile Payloads"
+GOLDEN_LSCWP="${GOLDEN_DIR}/lscwp"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/core/templates.sh"
+for prof in woocommerce wordpress generic; do
+    rendered="${TEST_TMP}/profile-${prof}.rendered"
+    template_render "${ROOT_DIR}/templates/lscwp/profile-${prof}.txt" \
+        "OBJECT=1" "OBJECT_HOST=127.0.0.1" "OBJECT_PORT=6379" \
+        "ESI=0" "CACHE_PRIV=0" "SITEMAP=http://example.test/wp-sitemap.xml" \
+        > "$rendered"
+    if [ -f "${GOLDEN_LSCWP}/profile-${prof}.txt" ]; then
+        if diff "${GOLDEN_LSCWP}/profile-${prof}.txt" "$rendered" >/dev/null 2>&1; then
+            log_pass "golden profile ${prof}: payload matches"
+        else
+            log_fail "golden profile ${prof}: payload differs"
+            diff "${GOLDEN_LSCWP}/profile-${prof}.txt" "$rendered" | head -5
+        fi
+    else
+        log_fail "golden profile ${prof}: golden file missing"
+    fi
+    if grep -q "@" "$rendered"; then
+        log_fail "golden profile ${prof}: unrendered @PLACEHOLDER@ left"
+    else
+        log_pass "golden profile ${prof}: all placeholders rendered"
+    fi
+done
+# Safety invariants across ALL profiles
+for prof in woocommerce wordpress generic; do
+    p="${ROOT_DIR}/templates/lscwp/profile-${prof}.txt"
+    if grep -qE "^guest-optm *= *0" "$p" && grep -qE "^optm-ucss *= *0" "$p" && \
+       grep -qE "^optm-css_comb *= *0" "$p" && grep -qE "^optm-js_defer *= *0" "$p" && \
+       grep -qE "^debug *= *0" "$p" && grep -qE "^object-life *= *600" "$p" && \
+       grep -qE "^cache-stale *= *1" "$p"; then
+        log_pass "profile ${prof}: safety invariants (no combine/UCSS/defer/guest-optm, stale on, obj-life 600)"
+    else
+        log_fail "profile ${prof}: safety invariant violated"
+    fi
+done
 
 ################################################################################
 # Summary

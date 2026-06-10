@@ -1,0 +1,38 @@
+# litespeed-optimizer LSCWP profile: woocommerce (SYNTHESIS §5)
+# Applied per-key via `wp litespeed-option set`. Safe defaults:
+# combine/UCSS/defer OFF (breaks add-to-cart & payment gateways),
+# Guest Optimization OFF, object cache lifetime >=600 (Woo sessions).
+cache = 1
+cache-priv = @CACHE_PRIV@
+cache-commenter = 0
+cache-rest = 1
+cache-mobile = 0
+cache-ttl_pub = 604800
+cache-ttl_priv = 1800
+cache-ttl_frontpage = 86400
+cache-stale = 1
+purge-upgrade = 1
+object = @OBJECT@
+object-kind = 1
+object-host = @OBJECT_HOST@
+object-port = @OBJECT_PORT@
+object-life = 600
+object-persistent = 1
+optm-css_min = 1
+optm-js_min = 1
+optm-html_min = 1
+optm-css_comb = 0
+optm-ucss = 0
+optm-js_comb = 0
+optm-js_defer = 0
+media-lazy = 1
+guest = 1
+guest-optm = 0
+esi = @ESI@
+esi-cache_admbar = @ESI@
+esi-cache_commform = @ESI@
+crawler = 1
+crawler-sitemap = @SITEMAP@
+crawler-load_limit = 1
+crawler-role_sims =
+debug = 0

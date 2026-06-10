@@ -192,7 +192,9 @@ _detect_wp_sites() {
         done
     done
 
-    if command -v wp &>/dev/null; then
+    if [ -n "${LSO_WP_BIN:-}" ] && [ -x "${LSO_WP_BIN}" ]; then
+        LSO_HAS_WPCLI=true
+    elif command -v wp &>/dev/null; then
         LSO_HAS_WPCLI=true
     else
         LSO_HAS_WPCLI=false

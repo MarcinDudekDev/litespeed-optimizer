@@ -8,12 +8,13 @@
 # verified restart-or-rollback after.
 ################################################################################
 
-# Canonical apply order per profile (Phase 2 features; grows in Phase 3/4)
+# Canonical apply order per profile (security/redis/mariadb/os land in Phase 3.5/4)
 PROFILE_FEATURES_GENERIC="server-tuning lsapi-tuning opcache"
-PROFILE_FEATURES_WORDPRESS="server-tuning lsapi-tuning opcache lscache"
-PROFILE_FEATURES_WOOCOMMERCE="server-tuning lsapi-tuning opcache lscache"
+PROFILE_FEATURES_WORDPRESS="server-tuning lsapi-tuning opcache lscache lscwp"
+PROFILE_FEATURES_WOOCOMMERCE="server-tuning lsapi-tuning opcache lscache lscwp woocommerce"
 
-# Resolve profile name -> feature list ("auto" picks wordpress when WP found)
+# Resolve profile name -> feature list. "auto": woocommerce when an active Woo
+# install is found, wordpress when WP sites exist, generic otherwise.
 # NOTE: called via $(...) — never log to stdout from here
 resolve_profile_features() {
     local profile="${1:-auto}"
@@ -21,9 +22,20 @@ resolve_profile_features() {
     if [ "$profile" = "auto" ]; then
         if [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
             profile="wordpress"
+            if type -t _lscwp_have_wpcli &>/dev/null && _lscwp_have_wpcli; then
+                local docroot
+                for docroot in "${LSO_WP_SITES[@]}"; do
+                    if lso_wp "$docroot" plugin is-active woocommerce >/dev/null 2>&1; then
+                        profile="woocommerce"
+                        break
+                    fi
+                done
+            fi
         else
             profile="generic"
         fi
+        # (runs in $(...): per-site profile choice re-resolves the same way
+        # inside _lscwp_profile_for, so the outcome stays consistent)
         echo "Profile auto-resolved to: $profile" >> "${LOG_FILE:-/dev/null}"
     fi
 

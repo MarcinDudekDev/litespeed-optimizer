@@ -1,0 +1,32 @@
+# litespeed-optimizer LSCWP profile: wordpress (SYNTHESIS §5)
+# Conservative: minify on, combine/UCSS/defer off, guest optimization off.
+cache = 1
+cache-priv = 0
+cache-commenter = 0
+cache-rest = 1
+cache-mobile = 0
+cache-ttl_pub = 604800
+cache-ttl_priv = 1800
+cache-ttl_frontpage = 604800
+cache-stale = 1
+purge-upgrade = 1
+object = 1
+object-kind = 1
+object-host = 127.0.0.1
+object-port = 6379
+object-life = 600
+object-persistent = 1
+optm-css_min = 1
+optm-js_min = 1
+optm-html_min = 1
+optm-css_comb = 0
+optm-ucss = 0
+optm-js_comb = 0
+optm-js_defer = 0
+media-lazy = 1
+guest = 1
+guest-optm = 0
+esi = 0
+crawler = 0
+crawler-role_sims =
+debug = 0
