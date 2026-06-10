@@ -9,9 +9,9 @@
 ################################################################################
 
 # Canonical apply order per profile (security/redis/mariadb/os land in Phase 3.5/4)
-PROFILE_FEATURES_GENERIC="server-tuning lsapi-tuning opcache"
-PROFILE_FEATURES_WORDPRESS="server-tuning lsapi-tuning opcache lscache lscwp"
-PROFILE_FEATURES_WOOCOMMERCE="server-tuning lsapi-tuning opcache lscache lscwp woocommerce"
+PROFILE_FEATURES_GENERIC="server-tuning lsapi-tuning opcache security"
+PROFILE_FEATURES_WORDPRESS="server-tuning lsapi-tuning opcache lscache lscwp security"
+PROFILE_FEATURES_WOOCOMMERCE="server-tuning lsapi-tuning opcache lscache lscwp woocommerce security"
 
 # Resolve profile name -> feature list. "auto": woocommerce when an active Woo
 # install is found, wordpress when WP sites exist, generic otherwise.

@@ -32,3 +32,15 @@
 
 ### Known limitations
 - LSCWP option KEY NAMES follow 6.x naming but are UNTESTED against a live plugin (mock-only) — Docker E2E pending (Phase 3.5)
+
+## [0.4.0] - 2026-06-10 (Phase 4 — security, analyze, benchmark, E2E)
+
+### Added
+- security feature: OLS perClientConnLimit throttling (dynReqPerSec 2, staticReqPerSec 40, soft/hard 15/20, ban 300, blockBadReq 1); Enterprise WordPressProtect drop,10 via Apache include; reCAPTCHA report-only guidance; ModSec detect+report (3.x-only note on OLS)
+- analyze command: weighted 0-100 audit with FIX hints across server/php/opcache/cache/object-cache/security; untestable checks excluded from denominator; danger findings (enableCache 1, debug log on, items_in_cart cache-kill) cap score at 59; --json support
+- benchmark command: curl x10 TTFB (dns/connect/tls breakdown), first-vs-median warm comparison, x-litespeed-cache hit verification, cart no-cache probe, JSON persistence with before/after delta
+- Docker E2E (tests/test-with-ols-docker.sh, skips cleanly without Docker): VERIFIED against live litespeedtech/openlitespeed — detect, check, dry-run, real optimize with restart+health check, HTTP 200 after, live invariant intact (7/7)
+- LSCWP key validation against plugin 7.8.1 source from wordpress.org: caught and FIXED 3 wrong keys (cache-stale->purge-stale, guest-optm->guest_optm, crawler-role_sims->crawler-roles); key list vendored at tests/fixtures/, profile lint added to suite
+
+### Changed
+- Version 0.4.0; security feature added to all optimize profiles; golden files regenerated

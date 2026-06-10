@@ -109,9 +109,10 @@ fi
 ################################################################################
 log_section "Functional Tests"
 
+expected_version=$(grep -m1 '^VERSION=' "$OPTIMIZER" | cut -d'"' -f2)
 version_output=$("${OPTIMIZER}" --version 2>&1 || true)
-if echo "$version_output" | grep -q "0.1.0"; then
-    log_pass "--version returns correct version"
+if echo "$version_output" | grep -q "$expected_version"; then
+    log_pass "--version returns ${expected_version}"
 else
     log_fail "--version incorrect: $version_output"
 fi
@@ -951,12 +952,12 @@ if grep -q "litespeed-option set cache-ttl_priv 1800" "$WPLOG"; then
 else
     log_fail "LSCWP: cache-ttl_priv not applied"
 fi
-if grep -q "litespeed-option set cache-stale 1" "$WPLOG"; then
+if grep -q "litespeed-option set purge-stale 1" "$WPLOG"; then
     log_pass "LSCWP: serve stale ON"
 else
     log_fail "LSCWP: serve stale not applied"
 fi
-if grep -q "litespeed-option set guest-optm 0" "$WPLOG"; then
+if grep -q "litespeed-option set guest_optm 0" "$WPLOG"; then
     log_pass "LSCWP: guest optimization OFF"
 else
     log_fail "LSCWP: guest-optm not applied"
@@ -973,10 +974,10 @@ if grep -q "litespeed-option set debug 0" "$WPLOG"; then
 else
     log_fail "LSCWP: debug not disabled"
 fi
-if grep -q "litespeed-option set crawler-role_sims " "$WPLOG"; then
+if grep -q "litespeed-option set crawler-roles " "$WPLOG"; then
     log_pass "LSCWP: crawler role simulation cleared"
 else
-    log_fail "LSCWP: crawler-role_sims not cleared"
+    log_fail "LSCWP: crawler-roles not cleared"
 fi
 # Redis present in plain-ols fixture -> object cache wired with lifetime 600
 if grep -q "litespeed-option set object 1" "$WPLOG" && \
@@ -1120,15 +1121,215 @@ done
 # Safety invariants across ALL profiles
 for prof in woocommerce wordpress generic; do
     p="${ROOT_DIR}/templates/lscwp/profile-${prof}.txt"
-    if grep -qE "^guest-optm *= *0" "$p" && grep -qE "^optm-ucss *= *0" "$p" && \
+    if grep -qE "^guest_optm *= *0" "$p" && grep -qE "^optm-ucss *= *0" "$p" && \
        grep -qE "^optm-css_comb *= *0" "$p" && grep -qE "^optm-js_defer *= *0" "$p" && \
        grep -qE "^debug *= *0" "$p" && grep -qE "^object-life *= *600" "$p" && \
-       grep -qE "^cache-stale *= *1" "$p"; then
+       grep -qE "^purge-stale *= *1" "$p"; then
         log_pass "profile ${prof}: safety invariants (no combine/UCSS/defer/guest-optm, stale on, obj-life 600)"
     else
         log_fail "profile ${prof}: safety invariant violated"
     fi
 done
+
+################################################################################
+# SECTION 14: LSCWP Option-Key Lint (profiles vs vendored plugin key list)
+################################################################################
+log_section "LSCWP Option-Key Lint"
+
+KEYLIST="${SCRIPT_DIR}/fixtures/lscwp-option-keys-7.8.1.txt"
+if [ -f "$KEYLIST" ]; then
+    unknown=0
+    for prof in "${ROOT_DIR}/templates/lscwp"/profile-*.txt; do
+        while IFS= read -r k; do
+            [ -z "$k" ] && continue
+            if ! grep -qx "$k" "$KEYLIST"; then
+                log_fail "$(basename "$prof"): unknown LSCWP key '$k'"
+                unknown=$((unknown + 1))
+            fi
+        done < <(grep -vE '^#|^$' "$prof" | awk -F' *= *' '{print $1}' | sed 's/ *$//')
+    done
+    if [ "$unknown" -eq 0 ]; then
+        log_pass "all profile keys exist in LSCWP 7.8.1 (vendored key list)"
+    fi
+else
+    log_fail "vendored key list missing: $KEYLIST"
+fi
+
+################################################################################
+# SECTION 15: Security Feature
+################################################################################
+log_section "Security Feature Tests"
+
+SEC_FIX="${TEST_TMP}/sec-fix"
+SEC_DATA="${TEST_TMP}/sec-data"
+mkdir -p "$SEC_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$SEC_FIX"
+mkdir -p "$SEC_FIX/etc/php.d"
+sec_out=$(LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --force 2>&1 || true)
+
+SEC_CONF="$SEC_FIX/usr/local/lsws/conf/httpd_config.conf"
+sec_block=$(awk '/^perClientConnLimit \{/,/^\}/' "$SEC_CONF")
+sec_ok=true
+for kv in "dynReqPerSec 2" "staticReqPerSec 40" "softLimit 15" "hardLimit 20" "gracePeriod 15" "banPeriod 300" "blockBadReq 1"; do
+    if ! echo "$sec_block" | grep -qE "$(echo "$kv" | awk '{print $1}')[[:space:]]+$(echo "$kv" | awk '{print $2}')\$"; then
+        log_fail "security: $kv not set"
+        sec_ok=false
+    fi
+done
+[ "$sec_ok" = true ] && log_pass "security: full perClientConnLimit throttling block applied"
+if echo "$sec_out" | grep -qi "recaptcha"; then
+    log_pass "security: reCAPTCHA report-only guidance printed"
+else
+    log_fail "security: reCAPTCHA guidance missing"
+fi
+if echo "$sec_out" | grep -qi "ModSecurity 3.x ONLY"; then
+    log_pass "security: ModSec 3.x-only note printed for OLS"
+else
+    log_fail "security: ModSec note missing"
+fi
+
+# Enterprise: WordPressProtect via include
+SEC_ENT_FIX="${TEST_TMP}/sec-ent-fix"
+SEC_ENT_DATA="${TEST_TMP}/sec-ent-data"
+mkdir -p "$SEC_ENT_DATA"
+cp -R "${CONFIGS_DIR}/cpanel-enterprise" "$SEC_ENT_FIX"
+mkdir -p "$SEC_ENT_FIX/etc/php.d"
+LSO_DATA_DIR="$SEC_ENT_DATA" LSO_FS_ROOT="$SEC_ENT_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_ENT_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --force >/dev/null 2>&1 || true
+if grep -q "WordPressProtect drop, 10" "$SEC_ENT_FIX/etc/apache2/conf.d/includes/pre_main_global.conf" 2>/dev/null; then
+    log_pass "security: WordPressProtect written on Enterprise"
+else
+    log_fail "security: WordPressProtect missing on Enterprise"
+fi
+
+################################################################################
+# SECTION 16: Analyze (scored audit)
+################################################################################
+log_section "Analyze Tests"
+
+# Untuned fixture -> low score with FIX hints
+AZ_FIX="${TEST_TMP}/az-fix"
+AZ_DATA="${TEST_TMP}/az-data"
+mkdir -p "$AZ_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$AZ_FIX"
+mkdir -p "$AZ_FIX/etc/php.d"
+az_before=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+score_before=$(echo "$az_before" | sed -n 's/.*SCORE: \([0-9]*\)\/100.*/\1/p' | head -1)
+if [ -n "$score_before" ]; then
+    log_pass "analyze produces a score on untuned box (${score_before}/100)"
+else
+    log_fail "analyze produced no score: $(echo "$az_before" | tail -3)"
+fi
+if echo "$az_before" | grep -q "FIX:"; then
+    log_pass "analyze prints FIX hints"
+else
+    log_fail "analyze FIX hints missing"
+fi
+
+# Optimize, then analyze again -> score must improve
+LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --force --quiet >/dev/null 2>&1 || true
+az_after=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+score_after=$(echo "$az_after" | sed -n 's/.*SCORE: \([0-9]*\)\/100.*/\1/p' | head -1)
+if [ -n "$score_before" ] && [ -n "$score_after" ] && [ "$score_after" -gt "$score_before" ]; then
+    log_pass "score improves after optimize (${score_before} -> ${score_after})"
+else
+    log_fail "score did not improve (${score_before:-?} -> ${score_after:-?})"
+fi
+if [ -n "$score_after" ] && [ "$score_after" -ge 90 ]; then
+    log_pass "tuned box scores >= 90 (${score_after})"
+else
+    log_fail "tuned box scores below 90 (${score_after:-?})"
+fi
+
+# Danger finding caps score at 59: force enableCache 1 server-wide
+DANGER_CONF="$AZ_FIX/usr/local/lsws/conf/httpd_config.conf"
+perl -pi -e 's/(enableCache\s+)0/${1}1/ if /enableCache/' "$DANGER_CONF"
+az_danger=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+score_danger=$(echo "$az_danger" | sed -n 's/.*SCORE: \([0-9]*\)\/100.*/\1/p' | head -1)
+if [ -n "$score_danger" ] && [ "$score_danger" -le 59 ] && echo "$az_danger" | grep -q "DANGER"; then
+    log_pass "enableCache 1 danger finding caps score at 59 (got ${score_danger})"
+else
+    log_fail "danger cap not applied (score ${score_danger:-?})"
+fi
+
+# analyze --json structure
+az_json=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" analyze --json 2>/dev/null || true)
+if echo "$az_json" | grep -q '"score":' && echo "$az_json" | grep -q '"checks":'; then
+    log_pass "analyze --json outputs score + checks array"
+else
+    log_fail "analyze --json malformed"
+fi
+
+################################################################################
+# SECTION 17: Benchmark (local test server)
+################################################################################
+log_section "Benchmark Tests"
+
+if command -v python3 &>/dev/null; then
+    BENCH_PORT=18913
+    python3 - "$BENCH_PORT" <<'PYEOF' &
+import sys, http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def _r(self):
+        self.send_response(200)
+        self.send_header("x-litespeed-cache", "hit")
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+    def do_GET(self):
+        self._r()
+        self.wfile.write(b"ok")
+    def do_HEAD(self):
+        self._r()
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYEOF
+    BENCH_PID=$!
+    sleep 1
+
+    bench_out=$(LSO_BENCH_RUNS=4 LSO_BENCH_CART=0 \
+        "${OPTIMIZER}" benchmark "http://127.0.0.1:${BENCH_PORT}/" 2>&1 || true)
+    kill "$BENCH_PID" 2>/dev/null || true
+
+    if echo "$bench_out" | grep -q "Median TTFB"; then
+        log_pass "benchmark reports median TTFB"
+    else
+        log_fail "benchmark median missing: $(echo "$bench_out" | tail -3)"
+    fi
+    if echo "$bench_out" | grep -q "page cache WORKING"; then
+        log_pass "benchmark verifies x-litespeed-cache: hit"
+    else
+        log_fail "benchmark cache-hit verification failed"
+    fi
+    if ls "${LSO_DATA_DIR}/benchmarks"/*.json >/dev/null 2>&1; then
+        log_pass "benchmark persists JSON result"
+    else
+        log_fail "benchmark JSON result missing"
+    fi
+else
+    log_skip "python3 unavailable — benchmark live test skipped"
+fi
+
+# Unreachable URL fails gracefully
+bench_bad=$("${OPTIMIZER}" benchmark "http://127.0.0.1:1/" 2>&1 || true)
+if echo "$bench_bad" | grep -qiE "failed|reachable"; then
+    log_pass "benchmark fails gracefully on unreachable URL"
+else
+    log_fail "benchmark bad-URL handling wrong"
+fi
 
 ################################################################################
 # Summary

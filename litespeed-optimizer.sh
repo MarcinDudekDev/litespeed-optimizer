@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # Script version
-VERSION="0.1.0"
+VERSION="0.4.0"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

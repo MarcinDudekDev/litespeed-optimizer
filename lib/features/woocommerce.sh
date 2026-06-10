@@ -58,7 +58,7 @@ _woo_apply_site() {
     # 2. Crawler: warm the cache; role simulation stays OFF (CVE surface)
     _woo_set_opt "$docroot" crawler 1
     _woo_set_opt "$docroot" crawler-load_limit 1
-    _woo_set_opt "$docroot" crawler-role_sims ""
+    _woo_set_opt "$docroot" crawler-roles ""
     if [ "${DRY_RUN:-false}" = true ]; then
         log_info "[DRY RUN] Would run: wp litespeed-crawler enable"
     else
