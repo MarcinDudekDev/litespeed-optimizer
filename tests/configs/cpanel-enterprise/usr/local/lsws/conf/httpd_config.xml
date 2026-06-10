@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<httpServerConfig>
+  <serverName>cpanel-ent</serverName>
+  <tuning><maxConnections>10000</maxConnections></tuning>
+</httpServerConfig>
