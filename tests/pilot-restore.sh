@@ -96,9 +96,22 @@ done
 
 say "Provisioning OLS (php, redis, wp-cli)..."
 in_ols "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq rsync curl redis-server >/dev/null 2>&1" || true
-PHPBIN=$(in_ols "ls /usr/local/lsws/lsphp*/bin/php 2>/dev/null | sort | tail -1" | tr -d '\r')
+
+# PHP parity: pin to the version agrido confirmed LIVE (default 83 = PHP 8.3.x,
+# matching mltools.pl's confirmed 8.3.31). LSO_PILOT_PHP overrides (e.g. 81).
+PHP_PIN="${LSO_PILOT_PHP:-83}"
+if ! in_ols "test -x /usr/local/lsws/lsphp${PHP_PIN}/bin/php"; then
+    say "Installing lsphp${PHP_PIN} to match live PHP..."
+    in_ols "apt-get install -y -qq lsphp${PHP_PIN} lsphp${PHP_PIN}-common lsphp${PHP_PIN}-mysql >/dev/null 2>&1" || \
+        warn "could not install lsphp${PHP_PIN} — falling back to bundled version"
+fi
+PHPBIN=$(in_ols "ls /usr/local/lsws/lsphp${PHP_PIN}/bin/php 2>/dev/null || ls /usr/local/lsws/lsphp*/bin/php 2>/dev/null | sort | tail -1" | tr -d '\r')
 [ -n "$PHPBIN" ] || die "no lsphp in image"
 PHPVER=$(echo "$PHPBIN" | sed -n 's|.*/lsphp\([0-9]*\)/.*|\1|p')
+ACTUAL_PHP=$(in_ols "$PHPBIN -v 2>/dev/null | head -1" | tr -d '\r')
+say "PHP pinned: lsphp${PHPVER} (${ACTUAL_PHP})"
+# Point the lsphp external app + scripthandler at the pinned binary
+in_ols "perl -pi -e 's|lsphp[0-9]*/bin/lsphp|lsphp${PHPVER}/bin/lsphp|g' /usr/local/lsws/conf/httpd_config.conf" || true
 in_ols "apt-get install -y -qq lsphp${PHPVER}-redis lsphp${PHPVER}-mysql >/dev/null 2>&1" || true
 in_ols "redis-server --daemonize yes --save '' --appendonly no" || true
 in_ols "curl -sLo /usr/local/bin/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && printf '#!/bin/sh\nexec ${PHPBIN} /usr/local/bin/wp-cli.phar \"\$@\"\n' > /usr/local/bin/wp && chmod +x /usr/local/bin/wp"

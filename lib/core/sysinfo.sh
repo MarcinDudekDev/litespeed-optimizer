@@ -144,8 +144,13 @@ lso_redis_mb() {
     fi
 }
 
-# OPcache memory_consumption in MB per tier
+# OPcache memory_consumption in MB per tier (LSO_OPCACHE_MB overrides — used
+# when production telemetry shows the default tier value is exhausted)
 lso_opcache_mb() {
+    if [ -n "${LSO_OPCACHE_MB:-}" ]; then
+        echo "$LSO_OPCACHE_MB"
+        return 0
+    fi
     local ram=${1:-$(sysinfo_ram_mb)}
     if [ "$ram" -lt 1536 ]; then echo 64
     elif [ "$ram" -lt 3072 ]; then echo 128

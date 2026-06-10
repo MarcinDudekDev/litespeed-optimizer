@@ -60,8 +60,9 @@ az_b=$(run_tool "analyze" 2>&1 || true)
 SCORE_B=$(echo "$az_b" | sed -n 's/.*SCORE: \([0-9]*\)\/100.*/\1/p' | head -1)
 [ -n "$SCORE_B" ] && log_pass "analyze (before): ${SCORE_B}/100" || log_fail "analyze before: no score"
 
-# 3. optimize
-opt=$(run_tool "optimize --profile woocommerce --force" 2>&1 || true)
+# 3. optimize (LSO_OPCACHE_MB=512: live opcache was 128MB/100%-full/69% hit —
+#    provision real headroom in staging to measure the hit-rate delta)
+opt=$(docker exec -e LSO_OPCACHE_MB=512 "$OLS" bash -c "cd /opt/lso && ./litespeed-optimizer.sh optimize --profile woocommerce --force" 2>&1 || true)
 echo "$opt" | grep -qE "applied, 0 failed" && log_pass "optimize --profile woocommerce: 0 failures" || log_fail "optimize failures: $(echo "$opt" | grep -iE 'FAIL|ERROR' | head -2)"
 echo "$opt" | grep -qiE "health check passed|Restart skipped" && log_pass "post-optimize health check OK" || log_fail "health check did not pass"
 
@@ -175,6 +176,21 @@ fi)
 | Status | Check |
 |---|---|
 ${ROWS}
+## Plugin landscape & cache-safety notes (from agrido)
+
+No dedicated cache-fighters (no currency/geo switchers), but these need watching:
+
+| Plugin | Cache interaction | Handling |
+|---|---|---|
+| baselinker-woo | stock/price sync → should purge | verify LSCWP purge fires on its updates; if not, add purge hook |
+| woocommerce-omnibus | purge on price change | same — confirm purge on price edits |
+| webp-converter-for-media | adds \`Vary: Accept\` via .htaccess | OK with LSCWP, but confirm the Vary header survives our config |
+| woo-conditional-payments | checkout-only logic | checkout is no-cache already — no conflict |
+| inpost-pay (widget) | dynamic cart/checkout widget | relies on cart pages being no-cache (verified above) |
+
+PHP pinned to **8.3.31** in staging to match live (agrido-confirmed 3/3).
+OPcache raised from the live 128MB (100% full, ~69% hit-rate) to measure headroom.
+
 ## No-SSH production remediation path
 
 The client's production host has no SSH. Deliver the fix via the generated

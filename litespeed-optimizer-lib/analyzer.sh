@@ -195,6 +195,58 @@ run_analyze() {
         _az_check 10 opcache "OPcache drop-in not deployed" fail "optimize --feature opcache"
     fi
 
+    # Runtime OPcache pressure (needs wp-cli to read opcache_get_status from the
+    # PHP that actually serves the site). Catches the classic under-provisioned
+    # case production telemetry shows: pool 100% full, low hit-rate, interned
+    # strings buffer exhausted — none of which the static ini size reveals.
+    if type -t _lscwp_have_wpcli &>/dev/null && _lscwp_have_wpcli && \
+       [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
+        local oc_json
+        oc_json=$(lso_wp "${LSO_WP_SITES[0]}" eval 'if(function_exists("opcache_get_status")){$s=opcache_get_status(false);echo json_encode(array("used"=>$s["memory_usage"]["used_memory"],"free"=>$s["memory_usage"]["free_memory"],"wasted"=>$s["memory_usage"]["wasted_memory"],"hits"=>$s["opcache_statistics"]["hits"],"misses"=>$s["opcache_statistics"]["misses"],"hit_rate"=>$s["opcache_statistics"]["opcache_hit_rate"],"interned_free"=>$s["interned_strings_usage"]["free_memory"],"keys"=>$s["opcache_statistics"]["num_cached_keys"],"max_keys"=>$s["opcache_statistics"]["max_cached_keys"]));}else{echo "{}";}' 2>/dev/null | tr -d '\r')
+
+        if [ -n "$oc_json" ] && [ "$oc_json" != "{}" ]; then
+            local oc_used oc_free oc_hr oc_interned
+            oc_used=$(echo "$oc_json" | sed -n 's/.*"used":\([0-9]*\).*/\1/p')
+            oc_free=$(echo "$oc_json" | sed -n 's/.*"free":\([0-9]*\).*/\1/p')
+            oc_hr=$(echo "$oc_json" | sed -n 's/.*"hit_rate":\([0-9]*\).*/\1/p')   # integer part
+            oc_interned=$(echo "$oc_json" | sed -n 's/.*"interned_free":\([0-9]*\).*/\1/p')
+
+            # Pool fill: free < 10% of (used+free) = pressure
+            if [ -n "$oc_used" ] && [ -n "$oc_free" ] && [ "$((oc_used + oc_free))" -gt 0 ]; then
+                local total_pool=$((oc_used + oc_free))
+                local free_pct=$(( oc_free * 100 / total_pool ))
+                local pool_mb=$(( total_pool / 1048576 ))
+                if [ "$free_pct" -lt 10 ]; then
+                    _az_check 4 opcache "OPcache pool ${free_pct}% free (${pool_mb}MB, near-full) — evictions thrash the cache" fail \
+                        "raise opcache.memory_consumption to $((pool_mb * 2))MB: LSO_OPCACHE_MB=$((pool_mb * 2)) optimize --feature opcache"
+                else
+                    _az_check 4 opcache "OPcache pool ${free_pct}% free (${pool_mb}MB) — healthy headroom" pass ""
+                fi
+            fi
+
+            # Hit-rate < 95% = cache too small / churning
+            if [ -n "$oc_hr" ]; then
+                if [ "$oc_hr" -lt 95 ]; then
+                    _az_check 3 opcache "OPcache hit-rate ${oc_hr}% (<95%) — recompiling scripts that should be cached" fail \
+                        "increase opcache.memory_consumption and opcache.max_accelerated_files (LSO_OPCACHE_MB=<bigger> optimize --feature opcache)"
+                else
+                    _az_check 3 opcache "OPcache hit-rate ${oc_hr}% (>=95%)" pass ""
+                fi
+            fi
+
+            # Interned strings buffer exhausted (free near 0)
+            if [ -n "$oc_interned" ]; then
+                local interned_kb=$(( oc_interned / 1024 ))
+                if [ "$interned_kb" -lt 256 ]; then
+                    _az_check 3 opcache "interned strings buffer exhausted (${interned_kb}KB free) — string dedup spills" fail \
+                        "raise opcache.interned_strings_buffer to 32-64 (MB) in the drop-in"
+                else
+                    _az_check 3 opcache "interned strings buffer has headroom (${interned_kb}KB free)" pass ""
+                fi
+            fi
+        fi
+    fi
+
     ############################################################
     # Page cache
     ############################################################

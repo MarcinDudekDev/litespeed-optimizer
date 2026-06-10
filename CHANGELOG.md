@@ -65,3 +65,9 @@
 
 ### Fixed
 - analyze --remote: cart-page check now requires HTTP 200 before flagging a cache hit (a CACHED 404 on /cart/ for localized shops like Polish /koszyk/ was a false-positive DANGER) and follows the homepage cart link to the localized slug; cart Store API cacheability check made independent of product discovery so it runs deterministically. Validated against the real production shop mltools.pl (cart-API cache-rest finding reproduced; localized cart correctly clears)
+
+### Added (pilot prep, cont.)
+- Basic Auth for remote/benchmark requests: --basic-auth <user:pass> flag + LSO_HTTP_AUTH env (for staging behind a Basic Auth gate); applied to analyze --remote and benchmark curl calls
+- analyze: runtime OPcache-pressure findings via wp-cli (opcache_get_status) — flags near-full pool, hit-rate <95%, and exhausted interned-strings buffer, each with a sizing FIX hint; LSO_OPCACHE_MB override to raise opcache.memory_consumption beyond the tier default when telemetry shows exhaustion
+- pilot-restore.sh: pins lsphp to the live-confirmed PHP version (default 8.3, LSO_PILOT_PHP override) and repoints the extprocessor at it
+- pilot-report.sh: plugin cache-safety/exclusions section; sets LSO_OPCACHE_MB=512 in staging to measure hit-rate headroom vs the live 128MB

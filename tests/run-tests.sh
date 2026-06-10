@@ -908,6 +908,18 @@ case "$args" in
     *"litespeed-option export"*)
         echo '{"mock":"export"}'
         exit 0 ;;
+    *"opcache_get_status"*)
+        # analyzer's runtime opcache probe (wp eval). WP_MOCK_OPCACHE:
+        #   full = pool 2% free, 69% hit-rate, interned exhausted (the live case)
+        #   healthy = plenty of headroom
+        if [ "${WP_MOCK_OPCACHE:-healthy}" = "full" ]; then
+            echo '{"used":131000000,"free":2000000,"wasted":500000,"hits":690,"misses":310,"hit_rate":69,"interned_free":1024,"keys":18000,"max_keys":20000}'
+        else
+            echo '{"used":40000000,"free":228000000,"wasted":100000,"hits":995,"misses":5,"hit_rate":99,"interned_free":8388608,"keys":3000,"max_keys":50000}'
+        fi
+        exit 0 ;;
+    *"eval"*)
+        exit 0 ;;
     *)
         exit 0 ;;
 esac
@@ -1640,6 +1652,145 @@ for prof in woocommerce wordpress generic; do
         log_fail "golden export ${prof}: golden file missing"
     fi
 done
+
+################################################################################
+# SECTION 20: Runtime OPcache-Pressure Finding (analyze + mock wp eval)
+################################################################################
+log_section "OPcache-Pressure Tests"
+
+# Reuse the plain-ols fixture (has a WP site); point wp at the mock with the
+# "full" opcache profile -> analyze must surface the pressure findings.
+OC_FIX="${TEST_TMP}/oc-fix"
+OC_DATA="${TEST_TMP}/oc-data"
+mkdir -p "$OC_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$OC_FIX"
+mkdir -p "$OC_FIX/etc/php.d"
+oc_out=$(WP_MOCK_OPCACHE=full LSO_WP_BIN="$MOCK_WP" \
+    LSO_DATA_DIR="$OC_DATA" LSO_FS_ROOT="$OC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OC_FIX/etc/php.d" \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+
+if echo "$oc_out" | grep -qi "OPcache pool .*free.*near-full"; then
+    log_pass "opcache: near-full pool flagged"
+else
+    log_fail "opcache: pool-full finding missing: $(echo "$oc_out" | grep -i opcache | head -3)"
+fi
+if echo "$oc_out" | grep -qi "hit-rate 69%"; then
+    log_pass "opcache: low hit-rate (69%) flagged"
+else
+    log_fail "opcache: hit-rate finding missing"
+fi
+if echo "$oc_out" | grep -qi "interned strings buffer exhausted"; then
+    log_pass "opcache: interned-strings exhaustion flagged"
+else
+    log_fail "opcache: interned-strings finding missing"
+fi
+if echo "$oc_out" | grep -qi "LSO_OPCACHE_MB="; then
+    log_pass "opcache: sizing FIX hint includes LSO_OPCACHE_MB override"
+else
+    log_fail "opcache: sizing FIX hint missing"
+fi
+
+# Healthy profile -> pressure findings pass, not fail
+oc_ok=$(WP_MOCK_OPCACHE=healthy LSO_WP_BIN="$MOCK_WP" \
+    LSO_DATA_DIR="$OC_DATA" LSO_FS_ROOT="$OC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OC_FIX/etc/php.d" \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+if echo "$oc_ok" | grep -qi "hit-rate 99%.*>=95" && echo "$oc_ok" | grep -qi "healthy headroom"; then
+    log_pass "opcache: healthy runtime stats pass (no false alarm)"
+else
+    log_fail "opcache: healthy stats wrongly flagged"
+fi
+
+# LSO_OPCACHE_MB override flows into the opcache drop-in
+OV_FIX="${TEST_TMP}/ov-fix"; OV_DATA="${TEST_TMP}/ov-data"
+mkdir -p "$OV_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$OV_FIX"; mkdir -p "$OV_FIX/etc/php.d"
+LSO_OPCACHE_MB=512 LSO_DATA_DIR="$OV_DATA" LSO_FS_ROOT="$OV_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OV_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature opcache --force >/dev/null 2>&1 || true
+if grep -q "memory_consumption=512" "$OV_FIX/etc/php.d/99-litespeed-optimizer-opcache.ini" 2>/dev/null; then
+    log_pass "LSO_OPCACHE_MB override flows into opcache drop-in (512MB)"
+else
+    log_fail "LSO_OPCACHE_MB override not applied"
+fi
+
+################################################################################
+# SECTION 21: Basic Auth (--basic-auth / LSO_HTTP_AUTH)
+################################################################################
+log_section "Basic Auth Tests"
+
+if command -v python3 &>/dev/null; then
+    BA_PORT=18916
+    python3 - "$BA_PORT" <<'PYEOF' &
+import sys, base64, http.server
+USER, PW = "mltools", "mltools"
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "LiteSpeed"   # the auto Server header identifies as LiteSpeed
+    sys_version = ""               # suppress Python/x.y suffix
+    def _auth_ok(self):
+        h = self.headers.get("Authorization", "")
+        if not h.startswith("Basic "): return False
+        try:
+            u, p = base64.b64decode(h[6:]).decode().split(":", 1)
+        except Exception:
+            return False
+        return u == USER and p == PW
+    def do_GET(self):
+        if not self._auth_ok():
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="x"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = b"<html>ok</html>"
+        self.send_response(200)
+        self.send_header("x-litespeed-cache", "hit")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYEOF
+    BA_PID=$!
+    sleep 1
+
+    # Without auth -> 401 -> "not LiteSpeed (or hidden)" + low score
+    noauth=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${BA_PORT}/" 2>&1 || true)
+    # With --basic-auth -> server detected, homepage cached
+    withauth=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${BA_PORT}/" --basic-auth mltools:mltools 2>&1 || true)
+    kill "$BA_PID" 2>/dev/null || true
+
+    if echo "$withauth" | grep -q "served by LiteSpeed"; then
+        log_pass "--basic-auth: authenticated request reaches the site"
+    else
+        log_fail "--basic-auth: site not reached with creds"
+    fi
+    if echo "$withauth" | grep -q "homepage cached"; then
+        log_pass "--basic-auth: cache check works behind Basic Auth gate"
+    else
+        log_fail "--basic-auth: cache check failed behind gate"
+    fi
+    # Without creds the gate returns 401: content/cache checks can't pass (a
+    # real LiteSpeed 401 still carries Server: LiteSpeed, so server detection
+    # legitimately works — the difference is everything behind the gate fails).
+    if ! echo "$noauth" | grep -q "homepage cached"; then
+        log_pass "without --basic-auth: 401 gate blocks cache/content checks"
+    else
+        log_fail "without --basic-auth: cache check passed without creds"
+    fi
+else
+    log_skip "python3 unavailable — Basic Auth tests skipped"
+fi
+
+# --basic-auth requires user:pass form
+ba_bad=$("${OPTIMIZER}" analyze --remote http://127.0.0.1:1/ --basic-auth nopass 2>&1 || true)
+if echo "$ba_bad" | grep -qi "requires user:password"; then
+    log_pass "--basic-auth rejects malformed value"
+else
+    log_fail "--basic-auth accepted malformed value"
+fi
 
 ################################################################################
 # Summary

@@ -300,6 +300,8 @@ OPTIONS:
     -q, --quiet                 Suppress informational output (for scripting)
     --verbose                   Show detailed technical output
     --json                      Output JSON (detect, status commands)
+    --basic-auth <user:pass>    Send HTTP Basic Auth on remote/benchmark requests
+                                (for staging behind a Basic Auth gate)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -654,6 +656,14 @@ parse_arguments() {
             --out)
                 if [ -z "${2:-}" ]; then log_error "--out requires a path"; exit 1; fi
                 OUT_FILE="$2"
+                shift 2
+                ;;
+            --basic-auth)
+                if [ -z "${2:-}" ] || [[ "$2" != *:* ]]; then
+                    log_error "--basic-auth requires user:password"
+                    exit 1
+                fi
+                export LSO_HTTP_AUTH="$2"
                 shift 2
                 ;;
             --list)
