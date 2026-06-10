@@ -271,6 +271,56 @@ else
 fi
 
 ############################################################
+# 8b. analyze --remote against the LIVE store (v0.2 feature)
+############################################################
+rm_out=$(LSO_DATA_DIR="$(mktemp -d)" LSO_REMOTE_DELAY=0 \
+    "$ROOT_DIR/litespeed-optimizer.sh" analyze --remote "$BASE/" 2>&1 || true)
+RM_SCORE=$(echo "$rm_out" | sed -n 's/.*REMOTE SCORE: \([0-9]*\)\/100.*/\1/p' | head -1)
+if [ -n "$RM_SCORE" ]; then
+    log_pass "analyze --remote on live store: score ${RM_SCORE}/100"
+else
+    log_fail "analyze --remote produced no score: $(echo "$rm_out" | tail -3)"
+fi
+if echo "$rm_out" | grep -q "WooCommerce detected"; then
+    log_pass "remote audit auto-detected WooCommerce"
+else
+    log_fail "remote audit missed WooCommerce"
+fi
+if echo "$rm_out" | grep -q "two-session cart isolation OK"; then
+    log_pass "remote isolation probe confirms no poisoning on live store"
+else
+    log_fail "remote isolation probe: $(echo "$rm_out" | grep -i isolation | head -1)"
+fi
+if echo "$rm_out" | grep -q "cart page not cache-served"; then
+    log_pass "remote audit confirms cart not cached"
+else
+    log_fail "remote cart check: $(echo "$rm_out" | grep -i 'cart' | head -1)"
+fi
+
+############################################################
+# 8c. export-profile import round-trip on the REAL plugin (v0.2 feature)
+############################################################
+XP_TMP=$(mktemp -d)
+"$ROOT_DIR/litespeed-optimizer.sh" export-profile --profile generic --out "$XP_TMP/p.data" >/dev/null 2>&1 || true
+if [ -f "$XP_TMP/p.data" ]; then
+    # generic differs from the applied woocommerce profile: ttl_frontpage 604800 vs 86400
+    docker cp "$XP_TMP/p.data" "$OLS:/tmp/lso-profile.data"
+    if wp_in "litespeed-option import /tmp/lso-profile.data" >/dev/null 2>&1; then
+        got=$(wp_in "litespeed-option get cache-ttl_frontpage" 2>/dev/null | tr -d '\r' | tail -1)
+        if [ "$got" = "604800" ]; then
+            log_pass "export-profile .data imports via REAL LSCWP and applies (ttl_frontpage 86400->604800)"
+        else
+            log_fail "import ran but option not applied (ttl_frontpage='$got')"
+        fi
+    else
+        log_fail "wp litespeed-option import rejected the generated .data file"
+    fi
+else
+    log_fail "export-profile generation failed in E2E"
+fi
+rm -rf "$XP_TMP"
+
+############################################################
 # 9. rollback test
 ############################################################
 BACKUP_TS=$(in_ols "ls -1 /root/.litespeed-optimizer/backups 2>/dev/null | head -1" | tr -d '\r')
@@ -328,7 +378,12 @@ ${RESULTS}
 2. The registered Woo cart page is correctly \`no-cache\` via LSCWP; ad-hoc pages
    containing \`[woocommerce_cart]\` outside the registered cart page are NOT excluded —
    don't duplicate cart shortcodes on cacheable pages.
-3. The Docker image's Example vhost serves \`index.html\` ahead of \`index.php\` —
+3. **\`cache-rest = 1\` can serve cached cart JSON** — with REST caching on, the Woo
+   Store API cart endpoint (\`?rest_route=/wc/store/v1/cart\`) was served from cache
+   to cookieless visitors (order-dependent stale/foreign cart JSON). The
+   woocommerce profile now ships \`cache-rest = 0\` and \`analyze --remote\` flags
+   cart-API cache hits as DANGER.
+4. The Docker image's Example vhost serves \`index.html\` ahead of \`index.php\` —
    WP appears installed (wp-cli works) while HTTP serves the static demo page.
 
 ## How to reproduce

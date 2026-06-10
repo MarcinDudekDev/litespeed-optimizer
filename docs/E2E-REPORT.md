@@ -1,9 +1,9 @@
 # E2E Report: WordPress + WooCommerce on OpenLiteSpeed
 
-- **Date**: 2026-06-10 15:40:36
+- **Date**: 2026-06-10 17:08:27
 - **Stack**: litespeedtech/openlitespeed:latest + mariadb:11 + Redis (in-container), WordPress + WooCommerce (real installs via wp-cli), lsphp82
-- **Tool**: litespeed-optimizer 0.4.0
-- **Result**: 23 passed, 0 failed
+- **Tool**: litespeed-optimizer 0.5.0
+- **Result**: 28 passed, 0 failed
 
 ## Scores & timing
 
@@ -11,8 +11,8 @@
 |---|---|
 | analyze score before optimize | 43/100 |
 | analyze score after optimize | 90/100 |
-| First-request TTFB (cache prime) | 1.5 ms |
-| Warm median TTFB (5 requests) | 1.5 ms |
+| First-request TTFB (cache prime) | 1.2 ms |
+| Warm median TTFB (5 requests) | 1.3 ms |
 
 ## Checks
 
@@ -37,16 +37,29 @@
 | PASS | session B does NOT see session A's cart (isolation OK) |
 | PASS | LSCWP object-cache.php drop-in installed |
 | PASS | Redis object cache connected (139 keys) |
-| PASS | benchmark: first 1.5 ms, warm median 1.5 ms |
+| PASS | benchmark: first 1.2 ms, warm median 1.3 ms |
 | PASS | benchmark confirms x-litespeed-cache: hit |
-| PASS | rollback 20260610-133653: restored + server verified healthy |
+| PASS | analyze --remote on live store: score 75/100 |
+| PASS | remote audit auto-detected WooCommerce |
+| PASS | remote isolation probe confirms no poisoning on live store |
+| PASS | remote audit confirms cart not cached |
+| PASS | export-profile .data imports via REAL LSCWP and applies (ttl_frontpage 86400->604800) |
+| PASS | rollback 20260610-150241: restored + server verified healthy |
 | PASS | store still serves HTTP 200 after rollback |
 
 ## Notable findings (from developing this E2E)
 
-1. **Vhost `rewrite { enable 0 }` silently breaks LSCWP cookie vary on OLS** — LSCWP's vary rules live in the `# BEGIN LSCACHE` .htaccess rewrite block; with the vhost rewrite engine off they never execute, and a page cached for a cart-holding session was served to a fresh session (real cache poisoning, reproduced). The `analyze` command now flags this as a DANGER finding. Fix: `rewrite { enable 1, autoLoadHtaccess 1 }` in vhconf.conf.
-2. The registered Woo cart page is correctly `no-cache` via LSCWP; ad-hoc pages containing `[woocommerce_cart]` outside the registered cart page are NOT excluded — don't duplicate cart shortcodes on cacheable pages.
-3. The Docker image's Example vhost serves `index.html` ahead of `index.php` — WP appears installed (wp-cli works) while HTTP serves the static demo page.
+1. **Vhost `rewrite { enable 0 }` silently breaks LSCWP cookie vary on OLS** —
+   LSCWP's vary rules live in the `# BEGIN LSCACHE` .htaccess rewrite block; with the
+   vhost rewrite engine off they never execute, and a page cached for a cart-holding
+   session was served to a fresh session (real cache poisoning, reproduced). The
+   `analyze` command now flags this as a DANGER finding. Fix: `rewrite { enable 1,
+   autoLoadHtaccess 1 }` in vhconf.conf.
+2. The registered Woo cart page is correctly `no-cache` via LSCWP; ad-hoc pages
+   containing `[woocommerce_cart]` outside the registered cart page are NOT excluded —
+   don't duplicate cart shortcodes on cacheable pages.
+3. The Docker image's Example vhost serves `index.html` ahead of `index.php` —
+   WP appears installed (wp-cli works) while HTTP serves the static demo page.
 
 ## How to reproduce
 

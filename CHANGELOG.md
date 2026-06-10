@@ -44,3 +44,14 @@
 
 ### Changed
 - Version 0.4.0; security feature added to all optimize profiles; golden files regenerated
+
+## [0.5.0] - 2026-06-10 (v0.2 features — no-SSH workflows)
+
+### Added
+- `analyze --remote <url>`: HTTP-only scored audit with zero server access — LiteSpeed detection, repeat-request cache hit, TTL/age, TTFB median, HTTP/3 (alt-svc), Brotli/gzip, security headers, plus WooCommerce probes (product cacheability, cart/checkout/wc-ajax must not be cache-served, two-session cart isolation via Store API, vary-poisoning signature: no-cache + hit on one response). GET-only, anonymous, rate-limited (1s default), hard request cap (25), identifying User-Agent. Run ONLY on sites you own or manage. FIX hints phrased for no-SSH contexts; --json supported
+- `export-profile --profile <name> [--out file]`: generates LSCWP-native .data import files (v4+ format verified against plugin 7.8.1 import.cls.php) for wp-admin > Toolbox > Import — no SSH needed. Companion README with import steps, verification checklist, and what the profile intentionally leaves off. Object-cache keys excluded by default (opt-in via LSO_EXPORT_REDIS_HOST) so an existing Redis setup is never silently disabled. E2E-verified: generated file imports through the REAL plugin and applies
+- E2E additions: live-store remote audit + .data import round-trip
+
+### Changed
+- woocommerce profile: cache-rest = 0 — with REST caching on, the Woo Store API cart endpoint can serve cached (stale/foreign) cart JSON to cookieless visitors; reproduced empirically in the E2E. Remote analyzer flags cart-API cache hits as DANGER
+- Version 0.5.0

@@ -7,7 +7,7 @@ The only optimizer for an *already-running* LiteSpeed/OpenLiteSpeed WordPress se
 
 Sibling project of [nginx-optimizer](https://github.com/MarcinDudekDev/nginx-optimizer), sharing its CLI conventions, backup/rollback pattern, and bash 3.2 portability.
 
-## Status: v0.4.0 — all v0.1-MVP phases complete
+## Status: v0.5.0 — v0.1 MVP + no-SSH workflows
 
 | Command | What it does |
 |---|---|
@@ -18,6 +18,8 @@ Sibling project of [nginx-optimizer](https://github.com/MarcinDudekDev/nginx-opt
 | `rollback <ts>` / `--list` | Verified restore: files back, checksum verification, graceful restart, HTTP health check, auto-restore on failure |
 | `status` | Which optimizations are applied (registry detect loop) |
 | `benchmark <url>` | TTFB ×10 (dns/connect/tls), first-vs-warm median, `x-litespeed-cache: hit` verification, cart no-cache probe, before/after history |
+| `analyze --remote <url>` | HTTP-only remote audit (no server access): cache/TTFB/HTTP3/compression/security + Woo cart-safety probes incl. two-session isolation. GET-only, anonymous, rate-limited — only on sites you own/manage |
+| `export-profile` | LSCWP-native `.data` settings file for wp-admin Toolbox import (no SSH) — verified against plugin 7.8.1 |
 
 **Features applied by `optimize`**: RAM-tier `tuning{}` · LSAPI sizing with the `maxConns == PHP_LSAPI_CHILDREN` invariant · OPcache drop-in · server-level LSCache safety config (`enableCache 0` — LSCWP drives caching) · LSCWP plugin install + CVE gate (≥6.5.1) + curated option profiles (validated against plugin 7.8.1 source) · Redis object-cache wiring (lifetime 600) · WooCommerce ESI (Enterprise) / warn+fallback (OLS) + crawler · per-client throttling + WordPressProtect.
 
@@ -33,7 +35,9 @@ cd litespeed-optimizer && ./install.sh
 ```bash
 litespeed-optimizer detect              # what am I running?
 litespeed-optimizer check               # safe to optimize?
-litespeed-optimizer optimize --dry-run  # preview (Phase 2+)
+litespeed-optimizer optimize --dry-run  # preview all changes
+litespeed-optimizer analyze --remote https://client-site.example   # no-SSH audit
+litespeed-optimizer export-profile --profile woocommerce           # wp-admin import file
 litespeed-optimizer rollback --list     # list backups
 litespeed-optimizer rollback 20260610-143022
 ```

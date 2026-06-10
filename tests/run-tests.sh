@@ -1332,6 +1332,316 @@ else
 fi
 
 ################################################################################
+# SECTION 18: Remote Analyzer (mock LiteSpeed site)
+################################################################################
+log_section "Remote Analyzer Tests"
+
+if command -v python3 &>/dev/null; then
+    RM_PORT=18914
+    # Mock site: argv[2]="good" = well-configured LiteSpeed+Woo store;
+    # "bad" = no security headers, cart served as cache HIT, vary broken.
+    python3 - "$RM_PORT" "good" <<'PYEOF' &
+import sys, json, http.server
+MODE = sys.argv[2]
+hits = {}
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        path = self.path
+        body = b"<html>ok</html>"
+        hdrs = {"Server": "LiteSpeed", "Content-Type": "text/html"}
+        cookie = self.headers.get("Cookie", "")
+        if MODE == "good":
+            hdrs["alt-svc"] = 'h3=":443"; ma=2592000'
+            hdrs["x-content-type-options"] = "nosniff"
+            hdrs["x-frame-options"] = "SAMEORIGIN"
+            hdrs["referrer-policy"] = "strict-origin-when-cross-origin"
+            hdrs["cache-control"] = "max-age=604800, public"
+            if "br" in self.headers.get("Accept-Encoding", ""):
+                hdrs["content-encoding"] = "br"
+        if "rest_route=/wc/store/v1/products" in path:
+            hdrs["Content-Type"] = "application/json"
+            body = json.dumps([{"id":10,"name":"Mock Widget",
+                "permalink":f"http://127.0.0.1:{sys.argv[1]}/?product=mock-widget"}], separators=(",", ":")).encode()
+        elif "rest_route=/wc/store/v1/cart" in path:
+            hdrs["Content-Type"] = "application/json"
+            hdrs["x-litespeed-cache-control"] = "no-cache"
+            if MODE == "bad":
+                hdrs["x-litespeed-cache"] = "hit"
+                body = json.dumps({"items": [{"name": "Mock Widget"}]}, separators=(",", ":")).encode()
+            else:
+                items = [{"name": "Mock Widget"}] if "cart=1" in cookie else []
+                body = json.dumps({"items": items}, separators=(",", ":")).encode()
+        elif "add-to-cart=" in path:
+            hdrs["x-litespeed-cache-control"] = "no-cache"
+            hdrs["Set-Cookie"] = "cart=1; path=/"
+        elif "/cart/" in path or "/checkout/" in path or "wc-ajax" in path:
+            if MODE == "bad":
+                hdrs["x-litespeed-cache"] = "hit"
+            else:
+                hdrs["x-litespeed-cache-control"] = "no-cache"
+        else:
+            # cacheable pages: miss first, hit afterwards (per path)
+            body = b"<html class=woocommerce>store</html>"
+            n = hits.get(path, 0)
+            hits[path] = n + 1
+            hdrs["x-litespeed-cache"] = "hit" if n > 0 else "miss"
+        self.send_response(200)
+        for k, v in hdrs.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYEOF
+    RM_PID=$!
+    sleep 1
+
+    rm_out=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${RM_PORT}/" 2>&1 || true)
+    kill "$RM_PID" 2>/dev/null || true
+
+    rm_score=$(echo "$rm_out" | sed -n 's/.*REMOTE SCORE: \([0-9]*\)\/100.*/\1/p' | head -1)
+    if [ -n "$rm_score" ] && [ "$rm_score" -ge 85 ]; then
+        log_pass "remote analyze: good mock site scores >= 85 (${rm_score})"
+    else
+        log_fail "remote analyze good-site score wrong: ${rm_score:-none}: $(echo "$rm_out" | tail -3)"
+    fi
+    if echo "$rm_out" | grep -q "homepage cached"; then
+        log_pass "remote: repeat-request cache hit detected"
+    else
+        log_fail "remote: cache hit not detected"
+    fi
+    if echo "$rm_out" | grep -q "HTTP/3 advertised"; then
+        log_pass "remote: alt-svc h3 detected"
+    else
+        log_fail "remote: HTTP/3 not detected"
+    fi
+    if echo "$rm_out" | grep -q "Brotli compression active"; then
+        log_pass "remote: brotli detected"
+    else
+        log_fail "remote: brotli not detected"
+    fi
+    if echo "$rm_out" | grep -q "product page cached"; then
+        log_pass "remote: Woo product probe works"
+    else
+        log_fail "remote: product probe failed"
+    fi
+    if echo "$rm_out" | grep -q "two-session cart isolation OK"; then
+        log_pass "remote: isolation probe works (A has item, B clean)"
+    else
+        log_fail "remote: isolation probe failed: $(echo "$rm_out" | grep -i isolation | head -1)"
+    fi
+
+    # Bad site: cart cached + vary-poisoning signature must produce DANGER + cap
+    python3 - "$RM_PORT" "bad" <<'PYEOF' &
+import sys, json, http.server
+MODE = sys.argv[2]
+hits = {}
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        path = self.path
+        body = b"<html class=woocommerce>store</html>"
+        hdrs = {"Server": "LiteSpeed", "Content-Type": "text/html"}
+        if "rest_route=/wc/store/v1/products" in path:
+            hdrs["Content-Type"] = "application/json"
+            body = json.dumps([{"id":10,"name":"Mock Widget",
+                "permalink":f"http://127.0.0.1:{sys.argv[1]}/?product=mock-widget"}], separators=(",", ":")).encode()
+        elif "rest_route=/wc/store/v1/cart" in path:
+            hdrs["Content-Type"] = "application/json"
+            hdrs["x-litespeed-cache-control"] = "no-cache"
+            hdrs["x-litespeed-cache"] = "hit"
+            body = json.dumps({"items": [{"name": "Mock Widget"}]}, separators=(",", ":")).encode()
+        elif "add-to-cart=" in path:
+            hdrs["Set-Cookie"] = "cart=1; path=/"
+        elif "/cart/" in path or "/checkout/" in path or "wc-ajax" in path:
+            hdrs["x-litespeed-cache"] = "hit"
+        else:
+            n = hits.get(path, 0)
+            hits[path] = n + 1
+            hdrs["x-litespeed-cache"] = "hit" if n > 0 else "miss"
+        self.send_response(200)
+        for k, v in hdrs.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYEOF
+    RM_PID=$!
+    sleep 1
+    rm_bad=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${RM_PORT}/" 2>&1 || true)
+    kill "$RM_PID" 2>/dev/null || true
+
+    bad_score=$(echo "$rm_bad" | sed -n 's/.*REMOTE SCORE: \([0-9]*\)\/100.*/\1/p' | head -1)
+    if echo "$rm_bad" | grep -q "served from cache"; then
+        log_pass "remote bad-site: cached cart flagged as DANGER"
+    else
+        log_fail "remote bad-site: cached cart NOT flagged"
+    fi
+    if echo "$rm_bad" | grep -q "no-cache + HIT"; then
+        log_pass "remote bad-site: vary-poisoning signature detected"
+    else
+        log_fail "remote bad-site: poisoning signature missed"
+    fi
+    if [ -n "$bad_score" ] && [ "$bad_score" -le 59 ]; then
+        log_pass "remote bad-site: danger caps score at 59 (got ${bad_score})"
+    else
+        log_fail "remote bad-site: cap not applied (${bad_score:-none})"
+    fi
+
+    # JSON output
+    python3 - "$RM_PORT" "good" <<'PYEOF' &
+import sys, http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"<html>ok</html>"
+        self.send_response(200)
+        self.send_header("Server", "LiteSpeed")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYEOF
+    RM_PID=$!
+    sleep 1
+    rm_json=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${RM_PORT}/" --json 2>/dev/null || true)
+    kill "$RM_PID" 2>/dev/null || true
+    if echo "$rm_json" | grep -q '"command": *"analyze-remote"' && echo "$rm_json" | grep -q '"requests_used"'; then
+        log_pass "remote analyze --json structure OK"
+    else
+        log_fail "remote analyze --json malformed"
+    fi
+
+    # UA + request cap sanity (from JSON requests_used)
+    used=$(echo "$rm_json" | sed -n 's/.*"requests_used": *\([0-9]*\).*/\1/p' | head -1)
+    if [ -n "$used" ] && [ "$used" -le 25 ]; then
+        log_pass "remote analyze respects request cap (used ${used} <= 25)"
+    else
+        log_fail "remote request count suspicious: ${used:-none}"
+    fi
+else
+    log_skip "python3 unavailable — remote analyzer tests skipped"
+fi
+
+# Bad URL rejected
+rm_badurl=$("${OPTIMIZER}" analyze --remote "not-a-url" 2>&1 || true)
+if echo "$rm_badurl" | grep -qiE "invalid|requires a full URL"; then
+    log_pass "analyze --remote rejects non-URL input"
+else
+    log_fail "analyze --remote accepted bad input"
+fi
+
+################################################################################
+# SECTION 19: export-profile (LSCWP .data import format)
+################################################################################
+log_section "Export-Profile Tests"
+
+XP_DIR="${TEST_TMP}/export"
+mkdir -p "$XP_DIR"
+
+for prof in woocommerce wordpress generic; do
+    out="${XP_DIR}/p-${prof}.data"
+    if "${OPTIMIZER}" export-profile --profile "$prof" --out "$out" >/dev/null 2>&1 && [ -f "$out" ]; then
+        log_pass "export-profile ${prof}: file generated"
+    else
+        log_fail "export-profile ${prof}: generation failed"
+        continue
+    fi
+
+    # First line must be the v4+ version marker (import.cls.php requirement)
+    if head -1 "$out" | grep -q '^\["_version",'; then
+        log_pass "export ${prof}: v4+ _version first line"
+    else
+        log_fail "export ${prof}: missing _version marker"
+    fi
+
+    # Round-trip: every non-empty line parses exactly like import.cls.php does
+    if command -v python3 &>/dev/null; then
+        if python3 -c "
+import json, sys
+keys = set()
+for line in open('$out'):
+    line = line.strip()
+    if not line: continue
+    k, v = json.loads(line)
+    assert isinstance(k, str) and isinstance(v, str), (k, v)
+    keys.add(k)
+vend = set(open('${SCRIPT_DIR}/fixtures/lscwp-option-keys-7.8.1.txt').read().split())
+unknown = [k for k in keys if k != '_version' and k not in vend]
+sys.exit(1 if unknown else 0)
+" 2>/dev/null; then
+            log_pass "export ${prof}: parses as import.cls.php would; all keys valid in 7.8.1"
+        else
+            log_fail "export ${prof}: round-trip/key validation failed"
+        fi
+    fi
+
+    # Object-cache keys excluded by default (never disable a site's Redis blindly)
+    if grep -q '"object' "$out"; then
+        log_fail "export ${prof}: object-* keys present without --redis opt-in"
+    else
+        log_pass "export ${prof}: object-cache keys excluded by default"
+    fi
+
+    # README companion exists with import steps
+    if grep -q "Toolbox > Import / Export" "${out%.data}.README.md" 2>/dev/null; then
+        log_pass "export ${prof}: README companion with wp-admin steps"
+    else
+        log_fail "export ${prof}: README missing/incomplete"
+    fi
+done
+
+# Safety invariants inside the exported woocommerce payload
+woo_data="${XP_DIR}/p-woocommerce.data"
+if grep -q '\["guest_optm","0"\]' "$woo_data" && grep -q '\["optm-ucss","0"\]' "$woo_data" && \
+   grep -q '\["optm-css_comb","0"\]' "$woo_data" && grep -q '\["purge-stale","1"\]' "$woo_data" && \
+   grep -q '\["cache-ttl_pub","604800"\]' "$woo_data"; then
+    log_pass "export woocommerce: safety invariants in payload"
+else
+    log_fail "export woocommerce: safety invariants broken"
+fi
+
+# Redis opt-in includes object keys with lifetime 600
+out_redis="${XP_DIR}/p-redis.data"
+LSO_EXPORT_REDIS_HOST=127.0.0.1 "${OPTIMIZER}" export-profile --profile woocommerce --out "$out_redis" >/dev/null 2>&1 || true
+if grep -q '\["object","1"\]' "$out_redis" && grep -q '\["object-life","600"\]' "$out_redis" && \
+   grep -q '\["object-host","127.0.0.1"\]' "$out_redis"; then
+    log_pass "export with LSO_EXPORT_REDIS_HOST: object cache wired (life 600)"
+else
+    log_fail "export redis opt-in wiring wrong"
+fi
+
+# Extension enforcement
+out_noext="${XP_DIR}/plain-name"
+"${OPTIMIZER}" export-profile --profile generic --out "$out_noext" >/dev/null 2>&1 || true
+if [ -f "${out_noext}.data" ]; then
+    log_pass "export-profile enforces .data extension (admin upload requirement)"
+else
+    log_fail "export-profile did not enforce .data extension"
+fi
+
+# Golden payload comparison
+GOLDEN_XP="${GOLDEN_DIR}/export"
+for prof in woocommerce wordpress generic; do
+    if [ -f "${GOLDEN_XP}/p-${prof}.data" ]; then
+        if diff "${GOLDEN_XP}/p-${prof}.data" "${XP_DIR}/p-${prof}.data" >/dev/null 2>&1; then
+            log_pass "golden export ${prof}: payload matches"
+        else
+            log_fail "golden export ${prof}: payload differs"
+        fi
+    else
+        log_fail "golden export ${prof}: golden file missing"
+    fi
+done
+
+################################################################################
 # Summary
 ################################################################################
 echo ""

@@ -2,10 +2,13 @@
 # Applied per-key via `wp litespeed-option set`. Safe defaults:
 # combine/UCSS/defer OFF (breaks add-to-cart & payment gateways),
 # Guest Optimization OFF, object cache lifetime >=600 (Woo sessions).
+# cache-rest OFF: with REST caching on, the Woo Store API cart endpoint
+# (?rest_route=/wc/store/v1/cart) can be served from cache to cookieless
+# visitors — stale/foreign cart JSON. Reproduced empirically in the E2E.
 cache = 1
 cache-priv = 0
 cache-commenter = 0
-cache-rest = 1
+cache-rest = 0
 cache-mobile = 0
 cache-ttl_pub = 604800
 cache-ttl_priv = 1800

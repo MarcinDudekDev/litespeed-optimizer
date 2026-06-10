@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # Script version
-VERSION="0.4.0"
+VERSION="0.5.0"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +52,8 @@ JSON_OUTPUT=false
 SHOW_VERSION=false
 NO_COLOR_FLAG=false
 LIST_MODE=false
+REMOTE_MODE=false
+OUT_FILE=""
 SPECIFIC_FEATURE=""
 EXCLUDE_FEATURE=""
 PROFILE="auto"
@@ -245,7 +247,7 @@ source_libraries() {
 
     # 4. Workflow libraries
     local lib
-    for lib in ui detector backup validator analyzer optimizer benchmark; do
+    for lib in ui detector backup validator analyzer remote-analyzer optimizer benchmark exporter; do
         local lib_file="${LIB_DIR}/${lib}.sh"
         if [ -f "$lib_file" ]; then
             # shellcheck source=/dev/null
@@ -272,7 +274,16 @@ COMMANDS:
                                 versions, RAM/CPU tier, WP sites, services
     check                       Pre-flight readiness check (root, lswsctrl,
                                 backup dir, wp-cli, panel warnings)
-    analyze [site]              Scored audit 0-100 with FIX hints (Phase 4)
+    analyze [site]              Scored audit 0-100 with FIX hints
+    analyze --remote <url>      HTTP-only remote audit (no server access needed):
+                                cache/TTFB/HTTP3/compression/security headers +
+                                WooCommerce cart-safety probes. GET-only,
+                                anonymous, rate-limited — run ONLY on sites
+                                you own or manage
+    export-profile              Generate an LSCWP settings file (.data) that
+                                clients import via wp-admin > LiteSpeed Cache >
+                                Toolbox > Import (no SSH needed); --profile,
+                                --out <file>
     optimize [site]             Apply optimizations (Phase 2+)
     rollback <timestamp>        Restore backup, restart, verify
     rollback --list             List available backups
@@ -458,6 +469,19 @@ cmd_check() {
 }
 
 cmd_analyze() {
+    if [ "$REMOTE_MODE" = true ]; then
+        if [ -z "$TARGET_SITE" ]; then
+            log_error "Usage: litespeed-optimizer analyze --remote <url>"
+            exit 1
+        fi
+        if type -t run_remote_analyze &>/dev/null; then
+            run_remote_analyze "$TARGET_SITE"
+            return $?
+        fi
+        log_error "Remote analyzer library not loaded"
+        exit 1
+    fi
+
     if type -t run_analyze &>/dev/null; then
         run_analyze "$TARGET_SITE"
     else
@@ -596,7 +620,7 @@ parse_arguments() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            detect|check|analyze|optimize|rollback|status|benchmark|help)
+            detect|check|analyze|optimize|rollback|status|benchmark|export-profile|help)
                 COMMAND="$1"
                 shift
                 ;;
@@ -622,6 +646,15 @@ parse_arguments() {
                 JSON_OUTPUT=true
                 QUIET=true  # JSON mode implies quiet
                 shift
+                ;;
+            --remote)
+                REMOTE_MODE=true
+                shift
+                ;;
+            --out)
+                if [ -z "${2:-}" ]; then log_error "--out requires a path"; exit 1; fi
+                OUT_FILE="$2"
+                shift 2
                 ;;
             --list)
                 LIST_MODE=true
@@ -749,6 +782,14 @@ main() {
 
     case "$COMMAND" in
         detect)    cmd_detect ;;
+        export-profile)
+            if type -t run_export_profile &>/dev/null; then
+                run_export_profile "$PROFILE" "$OUT_FILE"
+            else
+                log_error "Exporter library not loaded"
+                exit 1
+            fi
+            ;;
         check)     cmd_check ;;
         analyze)   cmd_analyze ;;
         optimize)  cmd_optimize ;;
