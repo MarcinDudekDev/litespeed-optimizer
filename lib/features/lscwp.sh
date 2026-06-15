@@ -162,7 +162,7 @@ _lscwp_fix_ownership() {
     mkdir -p "$litespeed_dir" 2>/dev/null || true
 
     local p fixed=0
-    for p in "$litespeed_dir" "${docroot%/}/wp-content/object-cache.php"; do
+    for p in "$litespeed_dir" "${docroot%/}/wp-content/object-cache.php" "${docroot%/}/.htaccess"; do
         [ -e "$p" ] || continue
         chown -R "$owner" "$p" 2>/dev/null && fixed=1
     done
@@ -241,6 +241,42 @@ lscwp_check_vary_cookies() {
         return 1
     fi
     return 0
+}
+
+# Ensure the WP docroot has a working .htaccess (issue #2). WordPress does not
+# reliably write .htaccess on LiteSpeed; without the rewrite block, pretty
+# permalinks 404 AND LSCWP's cache/vary rules (written into .htaccess) have
+# nowhere to live -> cart cache-poisoning risk. Write the canonical WordPress
+# mod_rewrite block idempotently if it is absent. (Found in live Woo E2E.)
+_lscwp_ensure_htaccess() {
+    local docroot="$1"
+    local htaccess="${docroot%/}/.htaccess"
+
+    if [ -f "$htaccess" ] && grep -q "# BEGIN WordPress" "$htaccess"; then
+        return 0                               # already has the WP rewrite block
+    fi
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] Would write canonical WordPress .htaccess rewrite block to ${htaccess}"
+        return 0
+    fi
+
+    local tmp="${htaccess}.lso.$$"
+    {
+        echo "# BEGIN WordPress"
+        echo "<IfModule mod_rewrite.c>"
+        echo "RewriteEngine On"
+        echo "RewriteBase /"
+        echo "RewriteRule ^index\\.php\$ - [L]"
+        echo "RewriteCond %{REQUEST_FILENAME} !-f"
+        echo "RewriteCond %{REQUEST_FILENAME} !-d"
+        echo "RewriteRule . /index.php [L]"
+        echo "</IfModule>"
+        echo "# END WordPress"
+        [ -f "$htaccess" ] && cat "$htaccess"
+    } > "$tmp"
+    [ -f "$htaccess" ] && copy_file_permissions "$htaccess" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$htaccess"
+    log_info "LSCWP: wrote canonical WordPress .htaccess (pretty permalinks + LSCWP rules)"
 }
 
 # Block access to *.log (CVE-2024-44000 surface) via mod_rewrite — the only
@@ -336,7 +372,8 @@ _lscwp_apply_site() {
     _lscwp_apply_profile "$docroot" "$rendered"
     rm -f "$rendered"
 
-    # 5. Hardening: .log access + vary sanity
+    # 5. Hardening: ensure WP .htaccess exists, block .log access, vary sanity
+    _lscwp_ensure_htaccess "$docroot"
     _lscwp_block_log_access "$docroot"
     lscwp_check_vary_cookies "$docroot" || true
 

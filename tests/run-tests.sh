@@ -1289,6 +1289,20 @@ else
     log_fail "danger cap not applied (score ${score_danger:-?})"
 fi
 
+# issue #2: analyze must flag a WP docroot whose .htaccess is missing (pretty
+# permalinks 404 + LSCWP cache/vary rules have nowhere to live).
+AZ_NOHT="${TEST_TMP}/az-noht"
+cp -R "${CONFIGS_DIR}/plain-ols" "$AZ_NOHT"
+rm -f "$AZ_NOHT/home/example.com/public_html/.htaccess"
+az_noht=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_NOHT" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_NOHT/etc/php.d" LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+if echo "$az_noht" | grep -q "WP .htaccess missing"; then
+    log_pass "analyze flags missing WP .htaccess (issue #2)"
+else
+    log_fail "analyze did not flag missing WP .htaccess"
+fi
+
 # analyze --json structure
 az_json=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
     LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \

@@ -297,6 +297,22 @@ run_analyze() {
                 _az_check 5 cache "vhost rewrite engine enabled (LSCWP vary cookies functional)" pass ""
             fi
         fi
+
+        # WP docroot must have .htaccess on LiteSpeed (issue #2): without it,
+        # pretty permalinks 404 and LSCWP's cache/vary rules (written there)
+        # have nowhere to live. optimize --feature lscwp self-heals it.
+        if [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
+            local ht_bad="" wp_site
+            for wp_site in "${LSO_WP_SITES[@]}"; do
+                [ -f "${wp_site%/}/wp-config.php" ] || continue
+                [ -f "${wp_site%/}/.htaccess" ] || ht_bad="${ht_bad} $(basename "$wp_site")"
+            done
+            if [ -n "$ht_bad" ]; then
+                _az_check 5 cache "WP .htaccess missing (${ht_bad# }) — permalinks 404 & LSCWP cache/vary rules absent" fail "optimize --feature lscwp (writes the canonical WordPress .htaccess)"
+            else
+                _az_check 5 cache "WP docroot .htaccess present (permalinks + LSCWP rules load)" pass ""
+            fi
+        fi
     else
         _az_check 16 cache "CacheRoot/CacheEngine (Enterprise include)" skip ""
     fi
