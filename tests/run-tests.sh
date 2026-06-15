@@ -219,10 +219,13 @@ if echo "$plain_json" | grep -q '"has_redis": *true'; then
 else
     log_fail "plain-ols: redis fixture NOT detected"
 fi
+# issue #1: fixture has lsphp81 (the configured handler) AND lsphp83 (newer,
+# installed but unused). Detection must follow the extProcessor handler (8.1),
+# NOT the highest installed (8.3) — else we'd tune the wrong PHP (silent no-op).
 if echo "$plain_json" | grep -q '"php_ver": *"8.1"'; then
-    log_pass "plain-ols: PHP version from lsphp81 dir"
+    log_pass "plain-ols: PHP version follows extProcessor handler (8.1, not newer 8.3)"
 else
-    log_fail "plain-ols: PHP version wrong: $plain_json"
+    log_fail "plain-ols: PHP detection picked wrong lsphp (want 8.1 handler, not highest): $plain_json"
 fi
 
 # cyberpanel: csf firewall detected

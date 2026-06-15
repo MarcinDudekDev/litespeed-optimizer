@@ -141,14 +141,30 @@ _detect_php() {
     LSO_PHP_INI=""
     LSO_PHP_VER=""
 
-    # Prefer the newest lsphp bundled with LiteSpeed
+    # Prefer the lsphp the vhost handler ACTUALLY runs (issue #1). The active
+    # version is whatever `extProcessor lsphp { path lsphpNN/bin/lsphp }` points
+    # to in the main config (OLS conf or LSWS xml) — not necessarily the newest
+    # installed. Tuning the wrong lsphp's php.ini/OPcache is a silent no-op
+    # (e.g. box runs lsphp82 but lsphp83 is also installed -> we'd tune 83).
+    local configured_dir=""
+    if [ -f "$LSO_MAIN_CONF" ]; then
+        configured_dir=$(grep -oE 'lsphp[0-9]+/bin/lsphp' "$LSO_MAIN_CONF" 2>/dev/null | head -1 || true)
+        configured_dir="${configured_dir%%/*}"
+    fi
+    if [ -n "$configured_dir" ] && [ -f "${LSO_LSWS_ROOT}/${configured_dir}/bin/php" ]; then
+        LSO_PHP_BIN="${LSO_LSWS_ROOT}/${configured_dir}/bin/php"
+    fi
+
+    # Fallback: the newest lsphp bundled with LiteSpeed (no handler match found)
     local d
-    for d in "${LSO_LSWS_ROOT}"/lsphp*/bin; do
-        [ -d "$d" ] || continue
-        if [ -f "$d/php" ]; then
-            LSO_PHP_BIN="$d/php"   # keep last (highest version) match
-        fi
-    done
+    if [ -z "$LSO_PHP_BIN" ]; then
+        for d in "${LSO_LSWS_ROOT}"/lsphp*/bin; do
+            [ -d "$d" ] || continue
+            if [ -f "$d/php" ]; then
+                LSO_PHP_BIN="$d/php"   # keep last (highest version) match
+            fi
+        done
+    fi
 
     # Fallback: system php
     if [ -z "$LSO_PHP_BIN" ] && command -v php &>/dev/null && [ -z "${LSO_FS_ROOT:-}" ]; then
