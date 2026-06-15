@@ -1156,6 +1156,21 @@ if grep -qE "^guest *= *0" "$WOO_PROFILE"; then
 else
     log_fail "profile woocommerce: Guest Mode must be OFF on shops (guest=0)"
 fi
+# issue #3: the `object` enable toggle must be applied AFTER object-host/port.
+# LSCWP validates the Redis connection at enable-time; enabling before host/port
+# are stored hits a fatal in object-cache.cls.php and silently fails to enable.
+for prof in woocommerce wordpress generic; do
+    p="${ROOT_DIR}/templates/lscwp/profile-${prof}.txt"
+    en_line=$(grep -nE "^object *=" "$p" | head -1 | cut -d: -f1)
+    host_line=$(grep -nE "^object-host *=" "$p" | head -1 | cut -d: -f1)
+    port_line=$(grep -nE "^object-port *=" "$p" | head -1 | cut -d: -f1)
+    if [ -n "$en_line" ] && [ -n "$host_line" ] && [ -n "$port_line" ] \
+       && [ "$en_line" -gt "$host_line" ] && [ "$en_line" -gt "$port_line" ]; then
+        log_pass "profile ${prof}: object enable applied after host/port (issue #3)"
+    else
+        log_fail "profile ${prof}: object enable must come after object-host/port (en=$en_line host=$host_line port=$port_line)"
+    fi
+done
 
 ################################################################################
 # SECTION 14: LSCWP Option-Key Lint (profiles vs vendored plugin key list)
