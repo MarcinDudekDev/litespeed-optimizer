@@ -136,6 +136,71 @@ _lscwp_apply_profile() {
     done < "$rendered"
 }
 
+# Normalize ownership of optimizer/LSCWP-generated paths (issue #4).
+# We run wp-cli with --allow-root, so files LSCWP creates (the object-cache.php
+# drop-in, and wp-content/litespeed where minified CSS/JS land) end up owned by
+# root. The LSPHP runtime then runs as the docroot owner and cannot write those
+# assets, so they 404 and the site renders UNSTYLED while analyze still scores
+# 100. Re-own the generated paths to the docroot owner so the runtime can write.
+_lscwp_fix_ownership() {
+    local docroot="$1"
+    [ -n "${LSO_FS_ROOT:-}" ] && return 0      # fixture/test mode: never touch fixtures
+    [ "$(id -u)" -eq 0 ] || return 0           # only meaningful when we ran as root
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] Would chown wp-content/litespeed + object-cache.php to the docroot owner"
+        return 0
+    fi
+
+    local owner
+    owner=$(stat -c '%U:%G' "$docroot" 2>/dev/null || stat -f '%Su:%Sg' "$docroot" 2>/dev/null) || return 0
+    case "$owner" in
+        root:*|''|:*) return 0 ;;              # docroot itself root-owned: no better runtime user to infer
+    esac
+
+    # Ensure the optimized-asset dir exists and is writable by the runtime user
+    local litespeed_dir="${docroot%/}/wp-content/litespeed"
+    mkdir -p "$litespeed_dir" 2>/dev/null || true
+
+    local p fixed=0
+    for p in "$litespeed_dir" "${docroot%/}/wp-content/object-cache.php"; do
+        [ -e "$p" ] || continue
+        chown -R "$owner" "$p" 2>/dev/null && fixed=1
+    done
+    [ "$fixed" = 1 ] && log_info "LSCWP: normalized ownership of generated assets to ${owner} (runtime can write minified CSS/JS)"
+}
+
+# Best-effort render smoke-test (issue #4). After enabling CSS/JS minification,
+# LSCWP rewrites asset URLs under /wp-content/litespeed/. If the runtime cannot
+# write them they 404 and the page renders unstyled — invisible to analyze.
+# Fetch the home page, pull one generated asset URL, and verify it serves 200.
+# Never fails the run: needs curl + a reachable siteurl, warns if it can't pass.
+_lscwp_verify_assets() {
+    local docroot="$1"
+    [ -n "${LSO_FS_ROOT:-}" ] && return 0
+    [ "${DRY_RUN:-false}" = true ] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    local siteurl
+    siteurl=$(lso_wp "$docroot" option get siteurl 2>/dev/null) || return 0
+    [ -z "$siteurl" ] && return 0
+
+    # First fetch triggers lazy asset generation; second returns the rewritten HTML
+    curl -sk --max-time 10 "${siteurl%/}/" -o /dev/null 2>/dev/null || return 0
+    local html asset code
+    html=$(curl -sk --max-time 10 "${siteurl%/}/" 2>/dev/null) || return 0
+    asset=$(printf '%s\n' "$html" | grep -oE 'https?://[[:alnum:]_./:?=&%~-]*wp-content/litespeed/[[:alnum:]_./:?=&%~-]+\.(css|js)' | head -1)
+    [ -z "$asset" ] && return 0                # minify produced no rewritten asset — nothing to verify
+
+    code=$(curl -sk --max-time 10 -o /dev/null -w '%{http_code}' "$asset" 2>/dev/null)
+    if [ "$code" = "200" ]; then
+        log_info "LSCWP: optimized asset verified (HTTP 200) — minified CSS/JS serving correctly"
+    else
+        log_warn "LSCWP: optimized asset returned HTTP ${code} (expected 200): ${asset}"
+        log_warn "  Minified CSS/JS may 404 -> site can render UNSTYLED. Ensure wp-content/litespeed is"
+        log_warn "  writable by the PHP runtime user, then re-run or: wp litespeed-purge all"
+    fi
+}
+
 # CVE version gate; updates the plugin when below minimum
 _lscwp_version_gate() {
     local docroot="$1"
@@ -282,6 +347,13 @@ _lscwp_apply_site() {
         lso_wp "$docroot" litespeed-purge all >/dev/null 2>&1 || log_warn "Purge failed (non-fatal)"
         log_info "LSCWP cache purged"
     fi
+
+    # 7. Re-own generated assets to the runtime user, then verify they serve
+    #    (issue #4: root-owned wp-content/litespeed -> minified CSS/JS 404 ->
+    #    unstyled site that analyze still scores 100). Order matters: fix
+    #    ownership first so the smoke-test's warm fetch can generate into it.
+    _lscwp_fix_ownership "$docroot"
+    _lscwp_verify_assets "$docroot"
 }
 
 feature_apply_custom_lscwp() {

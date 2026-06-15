@@ -1,7 +1,10 @@
 # litespeed-optimizer LSCWP profile: woocommerce (SYNTHESIS §5)
 # Applied per-key via `wp litespeed-option set`. Safe defaults:
 # combine/UCSS/defer OFF (breaks add-to-cart & payment gateways),
-# Guest Optimization OFF, object cache lifetime >=600 (Woo sessions).
+# Guest Mode OFF and Guest Optimization OFF, object cache lifetime >=600.
+# guest=0 on shops: the guest-cached first response + JS guest->real-session
+# handoff can drop the first add-to-cart, and OLS has no ESI to hole-punch the
+# cart. Confirmed broken in live Woo E2E (issue #5) — never enable on a store.
 # cache-rest OFF: with REST caching on, the Woo Store API cart endpoint
 # (?rest_route=/wc/store/v1/cart) can be served from cache to cookieless
 # visitors — stale/foreign cart JSON. Reproduced empirically in the E2E.
@@ -29,7 +32,7 @@ optm-ucss = 0
 optm-js_comb = 0
 optm-js_defer = 0
 media-lazy = 1
-guest = 1
+guest = 0
 guest_optm = 0
 esi = 0
 esi-cache_admbar = 0
