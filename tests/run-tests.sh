@@ -1145,6 +1145,14 @@ for prof in woocommerce wordpress generic; do
         log_fail "profile ${prof}: safety invariant violated"
     fi
 done
+# issue #5: Guest Mode must be OFF on the WooCommerce profile (breaks add-to-cart;
+# OLS has no ESI to hole-punch the cart). Confirmed in live Woo E2E.
+WOO_PROFILE="${ROOT_DIR}/templates/lscwp/profile-woocommerce.txt"
+if grep -qE "^guest *= *0" "$WOO_PROFILE"; then
+    log_pass "profile woocommerce: Guest Mode OFF (guest=0, shop-safe)"
+else
+    log_fail "profile woocommerce: Guest Mode must be OFF on shops (guest=0)"
+fi
 
 ################################################################################
 # SECTION 14: LSCWP Option-Key Lint (profiles vs vendored plugin key list)
