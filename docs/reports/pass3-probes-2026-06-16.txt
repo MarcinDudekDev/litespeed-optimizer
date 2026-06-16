@@ -1,0 +1,50 @@
+Pass-3 — MATCHED worker process models (FrankenPHP-worker-16 vs LiteSpeed-worker-16) — 2026-06-16
+ultrafastwoo deployed REAL FrankenPHP worker mode on big (reversible, Marcin-authorized):
+  apps.frankenphp = {"num_threads":20,"workers":[{"file_name":".../worker.php","num":16}]}, PHP 8.5.x.
+  Verified inside container: worker.php (5275b), Caddyfile `frankenphp { worker { file..; num 16 } }`.
+  Live cart-isolation smoke CLEAN (no cross-customer leak). Both sides SQLite (cart DB cost controlled).
+
+=== RENDER — origin-local median-20 TTFB (ms), CF-bypassed, acaia-orion PDP ===
+                         home    shop    pdp
+LS-worker  HIT           3.6     3.6     3.2
+LS-worker  MISS          41.2    57.0    47.9
+FP-worker  HIT (Souin)   4.9     5.0     4.8
+FP-worker  MISS          67.4    94.9    77.5     (re-run: 66.2/97.1/79.2 — stable, tight spread)
+FP-classic MISS          71      98      83       (Pass-2, ufw single-shot)
+
+=> FrankenPHP worker only ~7% faster than its own classic render. LiteSpeed-worker ~40% faster than
+   FrankenPHP-worker on uncached render even with process models MATCHED.
+
+=== CONCURRENCY — @50VU/20s, identical pass2.js harness (35% home/45% pdp/15% shop/5% cart store-API) ===
+                       throughput   cart p95   pdp p95(cached)  home p95   shop p95   fails
+LS-worker (16)         467.6 req/s  209 ms     3.29 ms          2.77 ms    3.37 ms    0%
+FP-worker (16)         313.3 req/s  1.37 s     11.62 ms         11.57 ms   13.5 ms    0%
+FP-classic (4thr)      310.8 req/s  1.41 s     11.49 ms         10.21 ms   14.01 ms   0%
+
+(LS-worker cross-check: Pass-2 11:42 run = 468.9/s, cart 201ms, pdp 2.7ms — fresh re-run matches.)
+
+=> Worker vs classic on FrankenPHP: throughput +0.8%, cart p95 -3% — within noise. Worker mode netted ~0.
+=> Matched worker-vs-worker: LiteSpeed ~49% more throughput, ~6.6x lower cart p95 (same SQLite backend),
+   ~3.5x lower cached p95, ~40% faster uncached render.
+
+KEY CORRECTION (ultrafastwoo): lsphp is NOT app-worker mode. It is a persistent PROCESS pool
+(php-fpm-style): the 16 children stay alive but each request does a FULL WP bootstrap (opcache hot).
+FrankenPHP-worker, by contrast, keeps WP RESIDENT and SKIPS bootstrap entirely.
+=> So FrankenPHP-worker has the structural advantage (no bootstrap) and lsphp does the "expensive" thing
+   (full bootstrap every request) — yet lsphp STILL beats FP-worker ~25% on render and ~6.6x on cart.
+
+VERDICT (Pass-3 SUPERSEDES Pass-2): the gap is the ENGINE / SAPI, not the process model.
+  - Pass-2 framed the gap as "FrankenPHP-classic vs LiteSpeed-worker process-model mismatch." Pass-3
+    matches FrankenPHP to worker mode (its best case, bootstrap skipped) and the gap does NOT close —
+    lsphp's per-request execution (LSAPI) is simply faster than FrankenPHP's for this Woo workload.
+  - Worker mode nets ZERO for this Woo app (corroborated on BOTH boxes):
+      * big origin: FP-worker ~7% faster than FP-classic render (noise).
+      * ultrafastwoo LOCAL before/after (MariaDB, median-15): WORKER 29.8/31.5/30.6 vs CLASSIC 26.7/28/28.5
+        — worker a HAIR SLOWER. The per-request cart-safety reset (new WC_Cart + WC_Customer(read) +
+        initialize_session + runtime cache flush, every request) costs ~as much as the bootstrap it skips.
+  - Worker mode IS leak-safe + correct (live cart-isolation smoke clean) — it just isn't a perf win for a
+    cart-bearing WooCommerce app.
+
+Residual confounds (labelled): clone lsphp84 (8.4.22) vs big PHP 8.5.x; both SQLite (cart DB cost equal);
+DC differs (Helsinki vs Nuremberg); reactive .hp.php SSE layer not exercised (page-delivery + store-API only).
+Big restored to original classic/watch state after capture.

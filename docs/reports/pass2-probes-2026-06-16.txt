@@ -1,0 +1,40 @@
+Pass-2 origin-local median-20 TTFB cross-check — 2026-06-16
+Method: curl time_starttransfer ON each host, loopback (--resolve host:port:127.0.0.1), CF bypassed.
+        22 samples/path, first 2 dropped (cold), median of remaining 20, ms.
+        HIT = warmed path; MISS = cache-buster ?cb= query (forces backend render). PDP slug:
+        /product/acaia-orion-bean-doser-dozownik-do-kawy-ciemnoszary/  (same catalog both sides).
+
+=== CLONE vhost (LiteSpeed) — VALID ===
+## ufwbench.loc:8443  (cache header: x-litespeed-cache)
+HIT  / : http=200  x-litespeed-cache: hit
+MISS /?cb : http=200  x-litespeed-cache: miss
+median TTFB (ms):
+mode         home       shop       pdp
+HIT          3.6        3.6        3.2
+MISS         41.2       57.0       47.9
+
+Cross-check vs ultrafastwoo single-shots (clone HIT 3.5; render 52/70/58): HIT matches tight;
+my median MISS (41/57/48) is cleaner and a bit faster than their high-side single samples. No drift.
+
+=== BIG box (Caddy/FrankenPHP) — INVALID at probe time, NOT PUBLISHED ===
+## big-ultrafastwoo.marcindudek.dev:443  (cache header: cache-status)
+All paths returned http=502  cache-status: Souin; fwd=uri-miss; detail=SERVE-HTTP-ERROR
+MISS≈HIT≈9ms == Caddy serving error pages, FrankenPHP upstream down.
+Root cause (CORRECTED): `docker ps` showed `big-frankenwp Up 4s (health: starting)`. ultrafastwoo
+investigated and found big-frankenwp has NEVER run worker mode — the Caddyfile's bare `frankenphp`
+directive has no config placeholder, so the worker-ENV config AND the watch overlay are both DEAD config
+(silently ignored; admin API apps.frankenphp={}, no worker metrics, startup log num_threads:4/no worker).
+The 502s were their REVERSIBLE attempt to force worker mode, which refuses to boot (plain WP index.php
+never reaches frankenphp_handle_request()). Big since RESTORED to original (classic mode, 200).
+
+Independent re-confirm (this session, post-restore): big all 200, container healthy 3 min, admin API
+apps.frankenphp empty. Cache-buster spot-check rendered live classic-mode pages ~97/187/97ms single-shot
+(opcache warming after restart) — same order as ultrafastwoo's measured 71/98/83 classic single-req.
+
+NET: Pass-2 = LiteSpeed-WORKER (16 persistent lsphp children) vs FrankenPHP-CLASSIC (full WP bootstrap
+per request). A PROCESS-MODEL mismatch, not an engine tie/loss. No "matched-worker" numbers to wait for
+(real FP worker mode needs worker.php wrapper + WP worker-safety patches = separate dev task, Marcin's call).
+FrankenPHP classic render published as a valid number: 71/98/83 home/shop/pdp.
+
+=== BIG box Souin HIT — RE-MEASURED after restore (median-9, all cache-status: hit) ===
+home 5.4ms | shop 4.7ms | pdp 5.5ms  (earlier ~15ms shop single-shot was noise; corrected in report ①)
