@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiteSpeed vs FrankenPHP — Pass-3 (matched worker mode)</title>
+<meta name="report-type" content="Benchmark">
+<meta name="report-project" content="litespeed-optimizer">
+<meta name="report-date" content="2026-06-16">
+<script type="application/json" id="report-meta">
+{"title": "LiteSpeed vs FrankenPHP — Pass-3 (matched worker mode)", "type": "Benchmark", "project": "litespeed-optimizer", "date": "2026-06-16"}
+</script>
+<link rel="stylesheet" href="/api/reports/theme/aurora.css">
+<link rel="stylesheet" href="file:///Users/cminds/.claude/themes/aurora.css">
+</head>
+<body>
+
+<a class="pdf-btn" href="#" download aria-label="Download PDF">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
+  Download PDF
+</a>
+<script>
+(function () {
+  var btn = document.querySelector('.pdf-btn');
+  if (btn) btn.href = location.pathname.replace(/\.html?$/i, '.pdf') || 'report.pdf';
+})();
+</script>
+
+<main class="wrap">
+
+  <header class="report-header">
+    <div class="eyebrow">Report &middot; Benchmark &middot; Pass-3</div>
+    <h1>LiteSpeed vs FrankenPHP — matched worker mode</h1>
+    <div class="meta">
+      <span><span class="k">Project</span><span class="v">litespeed-optimizer &times; ultrafastwoo</span></span>
+      <span><span class="k">Date</span><span class="v">2026-06-16</span></span>
+      <span class="badge badge-info">Origin-local</span>
+      <span class="badge badge-success">Verdict: engine/SAPI, not process model</span>
+    </div>
+  </header>
+
+  <section class="section">
+    <div class="section-title"><h2>Summary</h2></div>
+    <p>Pass-2 left one caveat open: the LiteSpeed win might be only a <em>process-model</em> artifact, since
+    the as-deployed FrankenPHP ran classic mode (full WordPress bootstrap per request) while LiteSpeed ran
+    persistent children. Pass-3 closes it. ultrafastwoo built and deployed <strong>real FrankenPHP worker
+    mode</strong> on the big box (reversible, Marcin-authorized, 16 workers to match LiteSpeed, with a
+    per-request WP+WooCommerce state reset that passed live cart-isolation tests).</p>
+    <p><strong>The gap did not close — it stayed.</strong> With FrankenPHP now <em>skipping</em> bootstrap
+    entirely (worker mode) and LiteSpeed's lsphp still doing a <em>full</em> bootstrap on every request,
+    LiteSpeed is still ~25% faster on uncached render and ~6.6&times; faster on the cart path. That inverts
+    the structural advantage and points the finger at the <strong>engine / SAPI</strong> itself: LSAPI's
+    per-request execution is simply faster than FrankenPHP's for this WooCommerce workload. And FrankenPHP
+    worker mode turned out to be a <strong>net-zero</strong> perf change versus its own classic mode —
+    correct and leak-safe, but not a win for a cart-bearing Woo app, because the state-reset it needs costs
+    about as much as the bootstrap it skips. <strong>Pass-3 supersedes Pass-2's conclusion.</strong></p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>The process models, stated precisely</h2></div>
+    <table>
+      <thead><tr><th>Stack</th><th>Process model</th><th>Per-request bootstrap?</th></tr></thead>
+      <tbody>
+        <tr><td>LiteSpeed (lsphp, 16 children)</td><td>Persistent <strong>process</strong> pool (php-fpm-style), opcache hot</td><td><strong>Yes</strong> — full WP bootstrap every request</td></tr>
+        <tr><td>FrankenPHP worker (16)</td><td>WordPress held <strong>resident</strong> in long-lived workers</td><td><strong>No</strong> — bootstrap skipped; pays a per-request WP/WC state-reset instead</td></tr>
+        <tr><td>FrankenPHP classic (4 threads)</td><td>Thread-per-request, fresh interpreter state</td><td><strong>Yes</strong> — full WP bootstrap every request</td></tr>
+      </tbody>
+    </table>
+    <p class="details-sub">Key point: lsphp is <em>not</em> &ldquo;worker mode&rdquo; in the FrankenPHP sense. It re-bootstraps WordPress per request — the thing worker mode exists to avoid — and still wins. So the comparison is no longer worker-vs-bootstrap; it is engine-vs-engine.</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Verdict</h2></div>
+    <blockquote>
+      FrankenPHP worker mode skips the WordPress bootstrap; LiteSpeed's lsphp does not. LiteSpeed still
+      wins ~25% on render and ~6.6&times; on cart. The difference is the engine/SAPI, not the process
+      model — and FrankenPHP worker mode is a net-zero change over its own classic mode for this Woo app.
+      <cite>&mdash; Pass-3, superseding Pass-2</cite>
+    </blockquote>
+    <table>
+      <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+      <tbody>
+        <tr><td>Was Pass-2's win just a process-model artifact?</td><td><strong>No.</strong> Matched to worker mode (FrankenPHP's best case), the gap held.</td></tr>
+        <tr><td>Does FrankenPHP worker mode help this WooCommerce app?</td><td><strong>Net zero.</strong> ~7% on big, a hair slower locally — inside noise, corroborated on both boxes.</td></tr>
+        <tr><td>Where does the LiteSpeed advantage come from?</td><td>The <strong>engine/SAPI</strong> (LSAPI per-request execution) + LSCache, not the process model.</td></tr>
+        <tr><td>Is FrankenPHP worker mode worth deploying anyway?</td><td>Only for correctness — it is leak-safe and passed cart-isolation. It is not a speed win here.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>&#9312; Uncached render — origin-local median-20 TTFB (MISS)</h2></div>
+    <p>Cache-buster <span class="mono">?cb=</span> forces a real backend render. Same <span class="mono">acaia-orion</span> PDP both sides; opcache warmed first. FrankenPHP-worker re-run was stable (66/97/79 second pass) with a tight spread.</p>
+    <table>
+      <thead><tr><th>Path</th><th>LiteSpeed lsphp (full bootstrap/req)</th><th>FrankenPHP worker (bootstrap skipped)</th><th>FrankenPHP classic</th></tr></thead>
+      <tbody>
+        <tr><td>home</td><td><strong>41.2&nbsp;ms</strong></td><td>67.4&nbsp;ms</td><td>71&nbsp;ms</td></tr>
+        <tr><td>shop</td><td><strong>57.0&nbsp;ms</strong></td><td>94.9&nbsp;ms</td><td>98&nbsp;ms</td></tr>
+        <tr><td>pdp</td><td><strong>47.9&nbsp;ms</strong></td><td>77.5&nbsp;ms</td><td>83&nbsp;ms</td></tr>
+      </tbody>
+    </table>
+    <p class="details-sub">LiteSpeed ~25&ndash;40% faster than FrankenPHP-<em>worker</em> despite doing the full bootstrap FrankenPHP-worker skips. FrankenPHP worker barely beats its own classic mode (~7%).</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>&#9313; Cached delivery — origin-local median-20 TTFB (HIT)</h2></div>
+    <table>
+      <thead><tr><th>Path</th><th>LiteSpeed (LSCache)</th><th>FrankenPHP (Souin)</th></tr></thead>
+      <tbody>
+        <tr><td>home</td><td><strong>3.6&nbsp;ms</strong></td><td>4.9&nbsp;ms</td></tr>
+        <tr><td>shop</td><td><strong>3.6&nbsp;ms</strong></td><td>5.0&nbsp;ms</td></tr>
+        <tr><td>pdp</td><td><strong>3.2&nbsp;ms</strong></td><td>4.8&nbsp;ms</td></tr>
+      </tbody>
+    </table>
+    <p class="details-sub">Edge-cache delivery — both single-digit ms; near-tie, slight LSCache edge. Not an engine result.</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>&#9314; Concurrency @ 50 VU / 20s — identical k6 harness</h2></div>
+    <p>Same <span class="mono">pass2.js</span> on both boxes, origin-local: 35% home / 45% pdp / 15% shop /
+    5% cart (uncacheable store-API GET). 0% errors everywhere. Both stacks on SQLite, so cart DB cost is
+    controlled — the cart column is the real-backend engine path.</p>
+    <table>
+      <thead><tr><th>Metric</th><th>LiteSpeed lsphp (16)</th><th>FrankenPHP worker (16)</th><th>FrankenPHP classic (4thr)</th></tr></thead>
+      <tbody>
+        <tr><td>Throughput</td><td><strong>467.6 req/s</strong></td><td>313.3 req/s</td><td>310.8 req/s</td></tr>
+        <tr><td>Cart p95 (real backend)</td><td><strong>209 ms</strong></td><td>1.37 s</td><td>1.41 s</td></tr>
+        <tr><td>PDP p95 (cached)</td><td><strong>3.29 ms</strong></td><td>11.62 ms</td><td>11.49 ms</td></tr>
+        <tr><td>Home p95 (cached)</td><td><strong>2.77 ms</strong></td><td>11.57 ms</td><td>10.21 ms</td></tr>
+        <tr><td>Shop p95 (cached)</td><td><strong>3.37 ms</strong></td><td>13.5 ms</td><td>14.01 ms</td></tr>
+      </tbody>
+    </table>
+    <p class="details-sub">LiteSpeed ~49% more throughput and ~6.6&times; lower cart p95 on the same SQLite backend. FrankenPHP worker vs classic: +0.8% throughput, &minus;3% cart p95 — noise. (LS-worker cross-check: a fresh re-run hit 467.6 req/s vs the Pass-2 468.9 — stable.)</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Why worker mode nets zero here</h2></div>
+    <aside class="aside">
+      <p><strong>The cart-safety reset costs about as much as the bootstrap it skips.</strong> WordPress is
+      not worker-safe by default, and WooCommerce least of all — <span class="mono">WC()->cart</span>,
+      <span class="mono">session</span>, and <span class="mono">customer</span> would leak across customers
+      in a resident worker. To stay correct, the worker re-runs, every request: a fresh
+      <span class="mono">WC_Cart</span>, <span class="mono">WC_Customer</span> (read), session
+      re-initialization, and a runtime cache flush. That mandatory reset is roughly as expensive as the
+      classic bootstrap it replaces — which is exactly why FrankenPHP-worker ≈ FrankenPHP-classic on both
+      boxes (big: ~7% faster; ultrafastwoo's local MariaDB before/after: worker <span class="mono">29.8/31.5/30.6</span>
+      vs classic <span class="mono">26.7/28.0/28.5</span> ms — a hair <em>slower</em>). Worker mode is still
+      the right call for correctness — it passed live cart-isolation smoke tests — it just is not a
+      performance win for a cart-bearing WooCommerce store.</p>
+    </aside>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Residual confounds — read before quoting any number</h2></div>
+    <table>
+      <thead><tr><th>Confound</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td>Process model</td><td><strong>Now controlled</strong> — Pass-3's whole point. FrankenPHP given worker mode (its best case); LiteSpeed lsphp still bootstraps per request and wins anyway.</td></tr>
+        <tr><td>PHP version</td><td>clone lsphp84 (8.4.22) vs big PHP 8.5.x — labelled; 8.5 lsphp not packaged yet</td></tr>
+        <tr><td>Database</td><td>both SQLite (cart DB cost equal across stacks); SQLite write serialization caps the cart path on both</td></tr>
+        <tr><td>FP-worker render tax</td><td>FrankenPHP-worker's render includes the unavoidable per-request cart-safety reset — but it does not even beat FP-classic, so worker mode is not a win regardless</td></tr>
+        <tr><td>Reactive layer</td><td>the <span class="mono">.hp.php</span> SSE layer is not exercised — page-delivery + store-API cart only</td></tr>
+        <tr><td>Hardware</td><td>both 2&nbsp;vCPU / 4&nbsp;GB shared AMD EPYC, same zone; DC differs (Helsinki vs Nuremberg)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Method &amp; provenance</h2></div>
+    <table>
+      <thead><tr><th>Item</th><th>Detail</th></tr></thead>
+      <tbody>
+        <tr><td>Worker mode proof (big)</td><td><span class="mono">apps.frankenphp.workers[0].num=16</span>, <span class="mono">worker.php</span> resident, Caddyfile <span class="mono">frankenphp { worker {…} }</span>; verified inside container</td></tr>
+        <tr><td>Render probe</td><td>origin-local <span class="mono">curl time_starttransfer</span>, 22 samples, first 2 dropped, median of 20</td></tr>
+        <tr><td>Concurrency</td><td>identical <span class="mono">pass2.js</span> k6 harness, 50 VU / 20s, both boxes origin-local, 0% errors</td></tr>
+        <tr><td>Cross-checks</td><td>FP-worker render re-run stable; LS-worker @50VU re-run matched Pass-2; worker≈classic corroborated on ultrafastwoo's local box</td></tr>
+        <tr><td>Reversibility</td><td>big restored to its exact original classic/watch state after capture</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    <span>Generated by Claude Code &middot; litespeed-optimizer &times; ultrafastwoo</span>
+    <span class="mono">2026-06-16</span>
+  </footer>
+
+</main>
+
+</body>
+</html>
