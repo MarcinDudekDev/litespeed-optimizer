@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiteSpeed vs Caddy / FrankenPHP — Pass-2 (same Datastar app)</title>
+<meta name="report-type" content="Benchmark">
+<meta name="report-project" content="litespeed-optimizer">
+<meta name="report-date" content="2026-06-16">
+<script type="application/json" id="report-meta">
+{"title": "LiteSpeed vs Caddy / FrankenPHP — Pass-2", "type": "Benchmark", "project": "litespeed-optimizer", "date": "2026-06-16"}
+</script>
+<link rel="stylesheet" href="/api/reports/theme/aurora.css">
+<link rel="stylesheet" href="file:///Users/cminds/.claude/themes/aurora.css">
+</head>
+<body>
+
+<a class="pdf-btn" href="#" download aria-label="Download PDF">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
+  Download PDF
+</a>
+<script>
+(function () {
+  var btn = document.querySelector('.pdf-btn');
+  if (btn) btn.href = location.pathname.replace(/\.html?$/i, '.pdf') || 'report.pdf';
+})();
+</script>
+
+<main class="wrap">
+
+  <header class="report-header">
+    <div class="eyebrow">Report &middot; Benchmark &middot; Pass-2</div>
+    <h1>LiteSpeed vs Caddy / FrankenPHP — same Datastar app</h1>
+    <div class="meta">
+      <span><span class="k">Project</span><span class="v">litespeed-optimizer &times; ultrafastwoo</span></span>
+      <span><span class="k">Date</span><span class="v">2026-06-16</span></span>
+      <span class="badge badge-info">Origin-local</span>
+      <span class="badge badge-success">Verdict: process-model mismatch</span>
+    </div>
+  </header>
+
+  <section class="section">
+    <div class="section-title"><h2>Summary</h2></div>
+    <p>Pass-2 makes the web server the <em>only</em> variable: ultrafastwoo's exact SQLite install
+    (WordPress&nbsp;7.0 / WooCommerce&nbsp;10.7 / Datastar theme / 500 products) was cloned onto the
+    LiteSpeed box as an isolated vhost (<span class="mono">ufwbench.loc:8443</span>, lsphp84,
+    <strong>16 persistent worker children</strong>, LSCache), serving the <em>same pages</em> as the
+    as-deployed Caddy/FrankenPHP demo on the big box.</p>
+    <p>Serving identical cached pages, the two stacks <strong>tie at the edge</strong> (LSCache vs Souin,
+    both single-digit ms). On uncached render the LiteSpeed clone is ~25&ndash;40% faster and far steadier
+    under load — but the honest reason is a <strong>process-model mismatch, not an engine win</strong>:
+    the as-deployed FrankenPHP runs in <strong>classic mode</strong> (full WordPress bootstrap on every
+    request, <span class="mono">num_threads:4</span>), while the LiteSpeed clone runs <strong>persistent
+    worker children</strong> that skip bootstrap. FrankenPHP's worker-mode and <span class="mono">watch</span>
+    settings were present but <strong>dead config</strong> (the Caddyfile's bare <span class="mono">frankenphp</span>
+    directive has no config placeholder, so both are silently ignored). FrankenPHP <em>can</em> run worker
+    mode, but plain WordPress is not worker-safe — it needs a <span class="mono">worker.php</span> wrapper +
+    patches, a separate dev task and Marcin's call. So there are no &ldquo;tuned matched-worker&rdquo;
+    numbers to wait for; this is the verdict.</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Verdict</h2></div>
+    <table>
+      <thead><tr><th>Axis</th><th>Result</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Cached-page delivery (edge cache)</td>
+          <td>LSCache and Souin both single-digit&nbsp;ms — effectively a <strong>tie</strong> at the cache layer</td>
+          <td><span class="badge badge-success">Published</span></td>
+        </tr>
+        <tr>
+          <td>Page-delivery render — LiteSpeed side</td>
+          <td>Clone uncached render <strong>41&ndash;57&nbsp;ms</strong> (my median-20), consistent with ultrafastwoo's 52&ndash;70&nbsp;ms single-shots</td>
+          <td><span class="badge badge-success">Published</span></td>
+        </tr>
+        <tr>
+          <td>Render &amp; concurrency head-to-head</td>
+          <td>LiteSpeed-worker beats FrankenPHP-<strong>classic</strong> — a <strong>process-model difference</strong> (persistent worker vs per-request bootstrap), <em>not</em> a PHP-engine verdict</td>
+          <td><span class="badge badge-success">Published — framed as process model</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <blockquote>
+      Same app, same pages: the stacks tie at the edge cache. On render and under load the LiteSpeed
+      clone wins — because it is comparing a persistent-worker process model against FrankenPHP running
+      classic per-request bootstrap. Match the process models (real FrankenPHP worker mode) and that gap
+      should largely close; that match is a separate WordPress-worker-safety task, not a tuning knob.
+      <cite>&mdash; Pass-2 verdict</cite>
+    </blockquote>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Methodology</h2></div>
+    <table>
+      <thead><tr><th>Control</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td>Same app, both servers</td><td>big's SQLite install cloned to <span class="mono">ufwbench.loc:8443</span>; server is the only variable</td></tr>
+        <tr><td>Origin-local, CF bypassed</td><td><span class="mono">curl --resolve host&rarr;127.0.0.1</span> on each host; no Cloudflare edge, no per-IP throttle</td></tr>
+        <tr><td>Metric</td><td><span class="mono">time_starttransfer</span> (TTFB), 22 samples/path, first 2 dropped, <strong>median of 20</strong>, in ms</td></tr>
+        <tr><td>HIT vs MISS</td><td>HIT = warmed path; MISS = cache-buster <span class="mono">?cb=</span> query forcing a backend render — symmetric LSCache &amp; Souin busting</td></tr>
+        <tr><td>Cache proof</td><td>clone HIT rows verified <span class="mono">x-litespeed-cache: hit</span>; big rows carry <span class="mono">cache-status: Souin</span></td></tr>
+        <tr><td>PDP under test</td><td><span class="mono">/product/acaia-orion-bean-doser-dozownik-do-kawy-ciemnoszary/</span> (same slug both catalogs)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>&#9312; Cached-page delivery — LSCache vs Souin (origin-local HIT)</h2></div>
+    <p>This is <strong>edge-cache delivery</strong>, not a PHP-engine result: LiteSpeed serves these from
+    LSCache, Caddy serves them from the Souin module — FrankenPHP never runs. Both are single-digit ms.</p>
+    <table>
+      <thead><tr><th>Path</th><th>LiteSpeed clone — my median-20</th><th>LiteSpeed clone — ufw single</th><th>Souin/Caddy (big) — my median-9</th></tr></thead>
+      <tbody>
+        <tr><td>home</td><td><strong>3.6&nbsp;ms</strong></td><td>3.5&nbsp;ms</td><td>5.4&nbsp;ms</td></tr>
+        <tr><td>shop</td><td><strong>3.6&nbsp;ms</strong></td><td>&mdash;</td><td>4.7&nbsp;ms</td></tr>
+        <tr><td>pdp</td><td><strong>3.2&nbsp;ms</strong></td><td>&mdash;</td><td>5.5&nbsp;ms</td></tr>
+      </tbody>
+    </table>
+    <p class="details-sub">Souin column re-measured origin-local (median-9, all <span class="mono">cache-status: hit</span>) — an earlier ~15&nbsp;ms shop single-shot was sampling noise. Label this as cached-page delivery in any quote — reading it as &ldquo;PHP engine&rdquo; would be wrong.</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>&#9313; Page-delivery render — forced backend (origin-local MISS)</h2></div>
+    <p>My median-20 on the LiteSpeed clone is the clean published number. The FrankenPHP column is a valid
+    <strong>classic-mode</strong> render (full WP bootstrap per request, <span class="mono">num_threads:4</span>)
+    — the worker/<span class="mono">watch</span> config was dead, so nothing artificially handicaps it; it
+    simply runs a different process model than the worker-mode clone.</p>
+    <table>
+      <thead><tr><th>Path</th><th>LiteSpeed clone (worker) — my median-20</th><th>LiteSpeed clone (worker) — ufw single</th><th>FrankenPHP big (classic) — ufw single</th></tr></thead>
+      <tbody>
+        <tr><td>home</td><td><strong>41.2&nbsp;ms</strong></td><td>52&nbsp;ms</td><td>71&nbsp;ms</td></tr>
+        <tr><td>shop</td><td><strong>57.0&nbsp;ms</strong></td><td>70&nbsp;ms</td><td>98&nbsp;ms</td></tr>
+        <tr><td>pdp</td><td><strong>47.9&nbsp;ms</strong></td><td>58&nbsp;ms</td><td>83&nbsp;ms</td></tr>
+      </tbody>
+    </table>
+    <p class="details-sub">My LiteSpeed medians (41/57/48) are a touch faster than ufw's single-shots (52/70/58) — both clone, sampling noise only, no drift. My post-restore spot-check on big rendered live classic-mode pages in the same order (sub-200&nbsp;ms single-shot, opcache warming after the container restart). The earlier 502s were ultrafastwoo's reversible attempt to force worker mode — WP refused to boot a worker loop — since fully restored.</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>&#9314; Concurrency @ 50 VU (ultrafastwoo k6, origin-local)</h2></div>
+    <p>Reported by ultrafastwoo, 0% errors both sides. This is <strong>worker vs classic</strong>, the same
+    process-model story — the cart path (cache-bypassed, hits the backend every request) is where a
+    persistent worker pool pulls decisively ahead of per-request bootstrap.</p>
+    <table>
+      <thead><tr><th>Metric</th><th>LiteSpeed (16 worker children)</th><th>FrankenPHP (classic, 4 threads)</th></tr></thead>
+      <tbody>
+        <tr><td>Throughput</td><td>469 req/s</td><td>311 req/s</td></tr>
+        <tr><td>PDP p95</td><td>2.7&nbsp;ms</td><td>11.5&nbsp;ms</td></tr>
+        <tr><td>Cart p95 (cache-bypass, real backend)</td><td>201&nbsp;ms</td><td>1.41&nbsp;s</td></tr>
+      </tbody>
+    </table>
+    <p class="details-sub">The cart p95 gap is the process-model difference at its sharpest — full WordPress bootstrap per cart request <em>plus</em> classic mode's 4-thread concurrency ceiling at 50&nbsp;VU, vs a warm 16-child worker pool. Both are consequences of the same dead worker config.</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Verdict — process model, not engine</h2></div>
+    <div class="score-block">
+      <div class="score-wrap">
+        <span class="score">worker<small>vs classic</small></span>
+      </div>
+      <div class="score-label">
+        <span class="lbl">LiteSpeed-worker vs FrankenPHP-classic</span>
+        <span class="badge badge-success">As-deployed: LiteSpeed faster on render &amp; load</span>
+      </div>
+      <div class="score-bar"></div>
+    </div>
+    <p>As deployed, the LiteSpeed clone (16 persistent lsphp worker children) serves uncached pages
+    ~25&ndash;40% faster and holds up far better under cart-heavy load than the FrankenPHP demo — because
+    FrankenPHP is running <strong>classic mode</strong> (full WordPress bootstrap per request), not its
+    persistent worker mode. Its worker-mode + <span class="mono">watch</span> directives are present but
+    inert: the Caddyfile's bare <span class="mono">frankenphp</span> block has no config placeholder, so
+    they are silently ignored (admin API <span class="mono">apps.frankenphp = {}</span>, no worker metrics).
+    Forcing worker mode refused to boot — plain WordPress <span class="mono">index.php</span> never reaches
+    <span class="mono">frankenphp_handle_request()</span>; real worker mode needs a
+    <span class="mono">worker.php</span> wrapper plus WP worker-safety patches. <strong>That is a separate
+    dev task and Marcin's call</strong>, not a benchmark knob — so this verdict is final, with the explicit
+    caveat that it compares two different process models, not two PHP engines head-to-head.</p>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Residual confounds — read before quoting any number</h2></div>
+    <table>
+      <thead><tr><th>Confound</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td>Process model</td><td><strong>The headline caveat</strong> — LiteSpeed persistent worker vs FrankenPHP classic per-request bootstrap; match them before calling it an engine result</td></tr>
+        <tr><td>FrankenPHP worker/<span class="mono">watch</span> config</td><td>Dead config — bare <span class="mono">frankenphp</span> Caddyfile directive ignores both; FrankenPHP ran plain classic mode, not handicapped by watch</td></tr>
+        <tr><td>PHP version</td><td>clone lsphp84 (8.4.22) vs big PHP 8.5.6 — labelled; 8.5 lsphp not packaged yet</td></tr>
+        <tr><td>Database</td><td>both SQLite on the matched pair (Pass-1's litespeed-demo was MariaDB)</td></tr>
+        <tr><td>Reactive layer</td><td>the <span class="mono">.hp.php</span> SSE layer does <strong>not</strong> run on lsphp — this is page-delivery only, not the full Datastar reactive stack</td></tr>
+        <tr><td>Hardware</td><td>both 2&nbsp;vCPU / 4&nbsp;GB shared AMD EPYC, same zone; DC differs (Helsinki vs Nuremberg)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <div class="section-title"><h2>Carry-over foot-gun from Pass-1</h2></div>
+    <aside class="aside">
+      <p><strong>OLS <span class="mono">perClientConnLimit</span> + Cloudflare real-client-IP.</strong>
+      OpenLiteSpeed self-protects against single-IP floods (default ~20 conn / 40 static-rps / 2 dyn-rps
+      <em>per IP</em>). Cloudflare forwards the <em>real</em> client IP, so a single-client k6 run through
+      CF trips that limit and produces an HTTP&nbsp;520 storm — which reads as a LiteSpeed &ldquo;loss&rdquo;
+      but is a security feature, not a capacity ceiling. Always benchmark OLS origin-local. The mirror-image
+      gap on the Caddy side: no origin per-IP cap, so it leans entirely on CF + origin firewalling. A
+      security trade-off on each side, not a speed gap.</p>
+    </aside>
+  </section>
+
+  <footer>
+    <span>Generated by Claude Code &middot; litespeed-optimizer &times; ultrafastwoo</span>
+    <span class="mono">2026-06-16</span>
+  </footer>
+
+</main>
+
+</body>
+</html>
