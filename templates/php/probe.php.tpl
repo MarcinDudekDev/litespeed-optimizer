@@ -33,6 +33,7 @@ $out = array(
     'redis_ext'    => extension_loaded('redis') ? (phpversion('redis') ?: '1') : false,
     'igbinary'     => extension_loaded('igbinary'),
     'redis_server' => null,
+    'opcache'      => null,
 );
 
 // Prove the Redis SERVER (not just the ext) is reachable from the web SAPI.
@@ -44,6 +45,35 @@ if (extension_loaded('redis')) {
     } catch (Throwable $e) {
         // Strip , { } so the driver's [^,}] JSON capture can't truncate mid-value.
         $out['redis_server'] = 'err:' . str_replace(array(',', '{', '}'), ' ', substr($e->getMessage(), 0, 40));
+    }
+}
+
+// Runtime OPcache stats — web-SAPI-only (CLI has opcache.enable_cli=0), so this
+// is the only honest way to read hit-rate / pool-fill / interned / key-table.
+// opcache_get_status(false) skips the (huge) per-script array. (agrido harness)
+if (function_exists('opcache_get_status')) {
+    $s = @opcache_get_status(false);
+    $c = @opcache_get_configuration();
+    if (is_array($s)) {
+        $mem    = isset($s['memory_usage']) ? $s['memory_usage'] : array();
+        $stat   = isset($s['opcache_statistics']) ? $s['opcache_statistics'] : array();
+        $intern = isset($s['interned_strings_usage']) ? $s['interned_strings_usage'] : array();
+        $dir    = isset($c['directives']) ? $c['directives'] : array();
+        $out['opcache'] = array(
+            'enabled'            => !empty($s['opcache_enabled']),
+            'mem_total'          => isset($dir['opcache.memory_consumption']) ? $dir['opcache.memory_consumption'] : null,
+            'mem_used'           => isset($mem['used_memory']) ? $mem['used_memory'] : null,
+            'mem_free'           => isset($mem['free_memory']) ? $mem['free_memory'] : null,
+            'mem_wasted'         => isset($mem['wasted_memory']) ? $mem['wasted_memory'] : null,
+            'hit_rate'           => isset($stat['opcache_hit_rate']) ? round($stat['opcache_hit_rate'], 1) : null,
+            'num_cached_keys'    => isset($stat['num_cached_keys']) ? $stat['num_cached_keys'] : null,
+            'max_cached_keys'    => isset($stat['max_cached_keys']) ? $stat['max_cached_keys'] : null,
+            'num_cached_scripts' => isset($stat['num_cached_scripts']) ? $stat['num_cached_scripts'] : null,
+            'oom_restarts'       => isset($stat['oom_restarts']) ? $stat['oom_restarts'] : null,
+            'interned_used'      => isset($intern['used_memory']) ? $intern['used_memory'] : null,
+            'interned_free'      => isset($intern['free_memory']) ? $intern['free_memory'] : null,
+            'interned_buffer'    => isset($intern['buffer_size']) ? $intern['buffer_size'] : null,
+        );
     }
 }
 

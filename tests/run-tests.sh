@@ -2016,8 +2016,106 @@ PYEOF
     else
         log_fail "probe-redis: missing-ext verdict not raised: $(echo "$prm" | tr -d '\n')"
     fi
+
+    # Part C — probe-opcache verdict branching (agrido field thresholds), via a
+    # canned-JSON responder so each trigger is exercised deterministically.
+    OPC_SRV="${TEST_TMP}/opc_server.py"
+    cat > "$OPC_SRV" <<'PYEOF'
+import sys, http.server
+BODY = sys.argv[2].encode()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(BODY))); self.end_headers(); self.wfile.write(BODY)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYEOF
+    OPC_DR="${TEST_TMP}/opc-docroot"; mkdir -p "$OPC_DR"
+    MB=1048576
+    # opcache JSON body: args = mem_used mem_free hit_rate keys scripts oom interned_free
+    opc_body() {
+        printf '{"php_version":"8.3.10","sapi":"litespeed","opcache":{"enabled":true,"mem_used":%d,"mem_free":%d,"hit_rate":%s,"num_cached_keys":%d,"max_cached_keys":16229,"num_cached_scripts":%d,"oom_restarts":%d,"interned_used":1000,"interned_free":%d,"interned_buffer":67108864}}' \
+            "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+    }
+    # run probe-opcache against a canned body; sets OPC_OUT / OPC_EXIT. $1 port $2 body $3 writable
+    opc_run() {
+        python3 "$OPC_SRV" "$1" "$2" & local p=$!; sleep 1
+        OPC_OUT=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$OPC_DR" \
+            LSO_PROBE_URL="http://127.0.0.1:$1" LSO_OPCACHE_INI_WRITABLE="${3:-1}" \
+            "${OPTIMIZER}" probe-opcache 2>&1; echo "EXIT:$?")
+        kill "$p" 2>/dev/null || true
+        OPC_EXIT=$(echo "$OPC_OUT" | sed -n 's/^EXIT:\([0-9]*\)$/\1/p')
+    }
+
+    opc_run 18920 "$(opc_body $((60*MB)) $((68*MB)) 99.2 1000 800 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "OPcache healthy" && [ "${OPC_EXIT:-1}" = "0" ]; then
+        log_pass "probe-opcache: healthy warm cache -> healthy, exit 0"
+    else
+        log_fail "probe-opcache: healthy case misjudged: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    opc_run 18921 "$(opc_body $((60*MB)) $((68*MB)) 99.0 1000 800 3 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "oom_restarts=3" && [ "${OPC_EXIT:-0}" != "0" ]; then
+        log_pass "probe-opcache: oom_restarts>0 -> undersized (definitive trigger)"
+    else
+        log_fail "probe-opcache: oom trigger missed: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    opc_run 18922 "$(opc_body $((120*MB)) $((5*MB)) 99.0 15500 800 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -qE "pool 4% free|key-table 15500" && [ "${OPC_EXIT:-0}" != "0" ]; then
+        log_pass "probe-opcache: pool<10% / key-table>=95% -> undersized"
+    else
+        log_fail "probe-opcache: mem/key trigger missed: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # Cold cache with a low hit-rate must NOT alarm (cumulative hit-rate, warmth gate)
+    opc_run 18923 "$(opc_body $((60*MB)) $((68*MB)) 40.0 200 10 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "OPcache healthy" && echo "$OPC_OUT" | grep -qi "cold" && [ "${OPC_EXIT:-1}" = "0" ]; then
+        log_pass "probe-opcache: low hit-rate on COLD cache not flagged (warmth gate)"
+    else
+        log_fail "probe-opcache: cold-cache warmth gate failed: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # Warm cache + low hit-rate -> soft trigger fires
+    opc_run 18924 "$(opc_body $((60*MB)) $((68*MB)) 80.0 1000 500 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "hit-rate 80% (<90% on a warm cache)" && [ "${OPC_EXIT:-0}" != "0" ]; then
+        log_pass "probe-opcache: low hit-rate on WARM cache -> undersized (soft trigger)"
+    else
+        log_fail "probe-opcache: warm low-hit trigger missed: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # Host-aware remediation: not self-fixable -> contact-host, no php.ini snippet
+    opc_run 18925 "$(opc_body $((120*MB)) $((5*MB)) 99.0 1000 800 0 $((40*MB)))" 0
+    if echo "$OPC_OUT" | grep -qi "Contact your host" && ! echo "$OPC_OUT" | grep -q "opcache.memory_consumption="; then
+        log_pass "probe-opcache: PHP_INI_SYSTEM not writable -> contact-host branch (no unappliable snippet)"
+    else
+        log_fail "probe-opcache: host-aware branch wrong: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # opcache disabled in the SAPI
+    python3 "$OPC_SRV" 18926 '{"php_version":"8.3.10","sapi":"litespeed","opcache":null}' & OPC_P=$!; sleep 1
+    opc_dis=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$OPC_DR" LSO_PROBE_URL="http://127.0.0.1:18926" \
+        "${OPTIMIZER}" probe-opcache 2>&1; echo "EXIT:$?")
+    kill "$OPC_P" 2>/dev/null || true
+    if echo "$opc_dis" | grep -q "OPcache is NOT enabled" && echo "$opc_dis" | grep -q "EXIT:1"; then
+        log_pass "probe-opcache: opcache disabled in web SAPI -> flagged, exit 1"
+    else
+        log_fail "probe-opcache: disabled-opcache not flagged: $(echo "$opc_dis" | tr -d '\n')"
+    fi
+
+    # --json verdict shape
+    python3 "$OPC_SRV" 18927 "$(opc_body $((120*MB)) $((5*MB)) 99.0 1000 800 0 $((40*MB)))" & OPC_JP=$!; sleep 1
+    opc_json=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$OPC_DR" LSO_PROBE_URL="http://127.0.0.1:18927" \
+        LSO_OPCACHE_INI_WRITABLE=1 "${OPTIMIZER}" probe-opcache --json 2>/dev/null || true)
+    kill "$OPC_JP" 2>/dev/null || true
+    if echo "$opc_json" | grep -qE '"verdict":[[:space:]]*"undersized"' && echo "$opc_json" | grep -qE '"opcache_enabled":[[:space:]]*true'; then
+        log_pass "probe-opcache --json: verdict + opcache_enabled fields present"
+    else
+        log_fail "probe-opcache --json malformed: $(echo "$opc_json" | tr -d '\n')"
+    fi
 else
-    log_skip "python3 unavailable — probe-redis --json tests skipped"
+    log_skip "python3 unavailable — probe-redis/probe-opcache tests skipped"
 fi
 
 ################################################################################
