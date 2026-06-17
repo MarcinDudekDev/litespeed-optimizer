@@ -394,8 +394,12 @@ run_analyze() {
         if lso_php_ext_loaded redis; then
             _az_check 3 objcache "redis PHP extension present in vhost lsphp${LSO_PHP_VER:+ $LSO_PHP_VER}" pass ""
         elif [ "$?" = 1 ]; then
+            # lsphp package tag is major+minor only (8.3.31 -> 83); the raw
+            # LSO_PHP_VER is the full version on real boxes, so strip the patch.
+            local _az_lsphp_tag
+            _az_lsphp_tag=$(printf '%s' "${LSO_PHP_VER:-}" | cut -d. -f1,2 | tr -d '.')
             _az_check 3 objcache "redis PHP extension MISSING from vhost lsphp${LSO_PHP_VER:+ $LSO_PHP_VER} — object cache silently falls back to MySQL" fail \
-                "install it for the serving lsphp (e.g. apt install lsphp${LSO_PHP_VER//./}-redis), restart, then verify in the web context: litespeed-optimizer probe-redis"
+                "install it for the serving lsphp (e.g. apt install lsphp${_az_lsphp_tag}-redis), restart, then verify in the web context: litespeed-optimizer probe-redis"
         fi
     else
         _az_check 4 objcache "Redis not installed — no object cache backend" fail "apt install redis-server, then optimize --feature lscwp"

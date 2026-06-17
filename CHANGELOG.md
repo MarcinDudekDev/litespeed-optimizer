@@ -1,6 +1,14 @@
 # Changelog
 
-## [0.7.1] - 2026-06-17 (probe-opcache field-hardening — agrido review)
+## [0.7.2] - 2026-06-17 (live E2E fixes — lsdemo)
+
+Two bugs found running the probes against the real OpenLiteSpeed + WordPress stack on lsdemo (both probes otherwise worked first try and found genuine issues: no redis ext in the lsphp83 web SAPI, and an actually-undersized OPcache — pool 0% free, hit-rate 60% on a 3847-script cache).
+
+### Fixed
+- **`probe-redis` / `probe-opcache` now run environment detection first.** They previously didn't, so `LSO_PHP_INI` was empty and `probe-opcache` *always* took the "contact host" remediation branch — even when run on-box as root with a writable lsphp php.ini (the primary use case). Now they detect quietly + non-fatally (`LSO_PROBE_*` overrides still win), so the self-fixable branch prints the actual sizing snippet, and the docroot/URL auto-resolve without explicit env vars.
+- **lsphp package hint stripped the patch version wrong.** On a real box `LSO_PHP_VER` is the full `8.3.31`, so the `analyze` redis-ext FIX said `apt install lsphp8331-redis` instead of `lsphp83-redis`. Now uses major.minor only (matches `probe-redis`, which was already correct). Regression test uses a 3-part version.
+
+
 
 ### Fixed
 - **Warmth gate raised 50 → 200 `num_cached_scripts`** for the soft hit-rate trigger. A real WordPress caches hundreds of scripts within the first few page loads, so a just-restarted WP serving ~60 scripts at hit-rate 80% would false-flag as "undersized" while merely warming. The hard triggers (oom / pool / key-table / interned) remain ungated — they're true regardless of warmth.
