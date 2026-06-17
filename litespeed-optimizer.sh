@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # Script version
-VERSION="0.7.1"
+VERSION="0.7.2"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -626,8 +626,20 @@ cmd_benchmark() {
     fi
 }
 
+# Populate the environment globals the probes use (LSO_WP_SITES for docroot
+# auto-detection, LSO_PHP_INI for the opcache self-fixable-vs-contact-host
+# branch, LSO_PHP_VER for the package hint). Quiet + non-fatal: explicit
+# LSO_PROBE_* overrides still win, and a box without LiteSpeed (or a fixture
+# run) just leaves the globals empty rather than aborting.
+_probe_detect() {
+    if type -t detect_environment &>/dev/null; then
+        detect_environment >/dev/null 2>&1 || true
+    fi
+}
+
 cmd_probe_redis() {
     if type -t run_probe_redis &>/dev/null; then
+        _probe_detect
         run_probe_redis
     else
         log_error "Probe library not loaded"
@@ -637,6 +649,7 @@ cmd_probe_redis() {
 
 cmd_probe_opcache() {
     if type -t run_probe_opcache &>/dev/null; then
+        _probe_detect
         run_probe_opcache
     else
         log_error "Probe library not loaded"

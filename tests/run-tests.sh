@@ -1966,7 +1966,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if MODE == "present":
             body = b'{"php_version":"8.3.10","sapi":"litespeed","redis_ext":"5.3.7","igbinary":true,"redis_server":"up"}'
         else:
-            body = b'{"php_version":"8.3.10","sapi":"litespeed","redis_ext":false,"igbinary":false,"redis_server":null}'
+            body = b'{"php_version":"8.3.31","sapi":"litespeed","redis_ext":false,"igbinary":false,"redis_server":null}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -2015,6 +2015,13 @@ PYEOF
         log_pass "probe-redis: missing ext -> MISSING verdict + nonzero exit (${prm_exit})"
     else
         log_fail "probe-redis: missing-ext verdict not raised: $(echo "$prm" | tr -d '\n')"
+    fi
+    # Regression: package hint strips the patch version (8.3.31 -> lsphp83-redis,
+    # NOT lsphp8331). Caught live on lsdemo where PHP_VERSION is the full triple.
+    if echo "$prm" | grep -q "lsphp83-redis"; then
+        log_pass "probe-redis: package hint uses major.minor lsphp tag (lsphp83-redis)"
+    else
+        log_fail "probe-redis: package hint malformed (expected lsphp83-redis): $(echo "$prm" | tr -d '\n')"
     fi
 
     # Part C — probe-opcache verdict branching (agrido field thresholds), via a
