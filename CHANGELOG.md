@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.1] - 2026-06-17 (probe-opcache field-hardening — agrido review)
+
+### Fixed
+- **Warmth gate raised 50 → 200 `num_cached_scripts`** for the soft hit-rate trigger. A real WordPress caches hundreds of scripts within the first few page loads, so a just-restarted WP serving ~60 scripts at hit-rate 80% would false-flag as "undersized" while merely warming. The hard triggers (oom / pool / key-table / interned) remain ungated — they're true regardless of warmth.
+
+### Changed
+- **Trigger-specific remediation**: the fix now names the directive that actually fired — key-table → `opcache.max_accelerated_files`, pool-full → `opcache.memory_consumption`, interned → `opcache.interned_strings_buffer` — instead of a generic "increase opcache".
+- **Fragmentation sub-branch**: low free **but** high `wasted_memory` (>20% of pool) means the pool is churned by recompiles, not genuinely too small — a bigger pool won't fix a thrashing one. It now recommends `opcache_reset()` + `opcache.validate_timestamps=0` FIRST. On non-writable (shared) hosting it notes `validate_timestamps` is `PHP_INI_ALL` and often settable via `.user.ini` even when `memory_consumption` is locked — a partial self-fix.
+- `--json` adds `wasted_pct`, `num_cached_scripts`, `fragmented`.
+
+### Tests
+- +3 (246 total): warming-WP-not-flagged, trigger-specific knob naming, fragmentation branch.
+
+### Credit
+- All three refinements from the agrido project's PR review.
+
 ## [0.7.0] - 2026-06-17 (web-SAPI OPcache probe)
 
 ### Added

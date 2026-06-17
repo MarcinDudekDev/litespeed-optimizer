@@ -281,9 +281,10 @@ run_probe_opcache() {
     fi
 
     # Pull the runtime numbers (bytes for memory; key/script counts; hit_rate %).
-    local mem_used mem_free hit_rate keys max_keys scripts oom interned_free interned_buf
+    local mem_used mem_free mem_wasted hit_rate keys max_keys scripts oom interned_free interned_buf
     mem_used=$(_probe_int "$(_probe_field "$one" mem_used)")
     mem_free=$(_probe_int "$(_probe_field "$one" mem_free)")
+    mem_wasted=$(_probe_int "$(_probe_field "$one" mem_wasted)")
     hit_rate=$(_probe_field "$one" hit_rate); hit_rate="${hit_rate%%.*}"; hit_rate=$(_probe_int "$hit_rate")
     keys=$(_probe_int "$(_probe_field "$one" num_cached_keys)")
     max_keys=$(_probe_int "$(_probe_field "$one" max_cached_keys)")
@@ -293,40 +294,52 @@ run_probe_opcache() {
     interned_buf=$(_probe_int "$(_probe_field "$one" interned_buffer)")
 
     # ---- Verdict (agrido field thresholds) -------------------------------------
-    # FULL/undersized if ANY hard trigger fires; hit_rate is a SOFT trigger and is
-    # only trusted on a WARM cache (cumulative-since-restart -> cold cache reads
-    # low and that is NORMAL, not a problem). num_cached_scripts is the warmth proxy.
-    local full=false reasons="" free_pct=-1 pool_mb=0
+    # Per-trigger flags so remediation can name the RIGHT directive (they are
+    # different knobs). HARD triggers (oom/mem/keys/interned) are true regardless
+    # of cache warmth. hit_rate is the only SOFT trigger: cumulative-since-restart,
+    # so it reads low on a cold/warming cache (NORMAL). It is gated on warmth via
+    # num_cached_scripts — and the gate is 200, not 50, because a real WordPress
+    # caches hundreds of scripts within the first few page loads, so a lower gate
+    # would false-flag a merely-warming WP as undersized (agrido review).
+    local full=false reasons="" free_pct=-1 pool_mb=0 wasted_pct=-1
+    local t_oom=false t_mem=false t_keys=false t_interned=false t_hit=false
     if [ -n "$mem_used" ] && [ -n "$mem_free" ] && [ "$((mem_used + mem_free))" -gt 0 ]; then
         local total=$((mem_used + mem_free))
         free_pct=$(( mem_free * 100 / total ))
         pool_mb=$(( total / 1048576 ))
+        [ -n "$mem_wasted" ] && wasted_pct=$(( mem_wasted * 100 / total ))
     fi
 
     if [ -n "$oom" ] && [ "$oom" -gt 0 ]; then
-        full=true; reasons="${reasons}; oom_restarts=${oom} (cache thrashing/restarting under load)"
+        full=true; t_oom=true; reasons="${reasons}; oom_restarts=${oom} (cache thrashing/restarting under load)"
     fi
     if [ "$free_pct" -ge 0 ] && [ "$free_pct" -lt 10 ]; then
-        full=true; reasons="${reasons}; pool ${free_pct}% free (<10%, ${pool_mb}MB)"
+        full=true; t_mem=true; reasons="${reasons}; pool ${free_pct}% free (<10%, ${pool_mb}MB)"
     fi
     if [ -n "$keys" ] && [ -n "$max_keys" ] && [ "$max_keys" -gt 0 ]; then
         # keys >= 95% of max_keys (key-table saturated — mem can look free)
         if [ "$(( keys * 100 / max_keys ))" -ge 95 ]; then
-            full=true; reasons="${reasons}; key-table ${keys}/${max_keys} (>=95%, no script slots)"
+            full=true; t_keys=true; reasons="${reasons}; key-table ${keys}/${max_keys} (>=95%, no script slots)"
         fi
     fi
     if [ -n "$interned_free" ] && [ -n "$interned_buf" ] && [ "$interned_buf" -gt 0 ]; then
         if [ "$(( interned_free * 100 / interned_buf ))" -lt 5 ]; then
-            full=true; reasons="${reasons}; interned-strings buffer <5% free (string dedup spills)"
+            full=true; t_interned=true; reasons="${reasons}; interned-strings buffer <5% free (string dedup spills)"
         fi
     fi
     local hr_warm=false hr_low=false
-    if [ -n "$scripts" ] && [ "$scripts" -ge 50 ]; then hr_warm=true; fi
+    if [ -n "$scripts" ] && [ "$scripts" -ge 200 ]; then hr_warm=true; fi
     if [ -n "$hit_rate" ] && [ "$hit_rate" -lt 90 ]; then hr_low=true; fi
     if [ "$hr_warm" = true ] && [ "$hr_low" = true ]; then
-        full=true; reasons="${reasons}; hit-rate ${hit_rate}% (<90% on a warm cache)"
+        full=true; t_hit=true; reasons="${reasons}; hit-rate ${hit_rate}% (<90% on a warm cache)"
     fi
     reasons="${reasons#; }"
+
+    # Fragmentation: low free but HIGH wasted (>20% of pool) means the pool is
+    # churned by recompiles, not genuinely too small — a bigger pool won't fix a
+    # thrashing one. Fix the churn (reset + validate_timestamps=0) FIRST.
+    local fragmented=false
+    if [ "$t_mem" = true ] && [ "$wasted_pct" -ge 20 ]; then fragmented=true; fi
 
     # ---- Host-aware remediation (detect-AND-fix split) -------------------------
     # opcache.* are PHP_INI_SYSTEM: on shared/managed hosting they are often NOT
@@ -342,17 +355,17 @@ run_probe_opcache() {
     fi
 
     if [ "${JSON_OUTPUT:-false}" = true ]; then
-        json_output "$(printf '{"command":"probe-opcache","sapi":"%s","php_version":"%s","opcache_enabled":true,"verdict":"%s","pool_mb":%s,"free_pct":%s,"hit_rate":%s,"num_cached_keys":%s,"max_cached_keys":%s,"oom_restarts":%s,"self_fixable":%s}' \
+        json_output "$(printf '{"command":"probe-opcache","sapi":"%s","php_version":"%s","opcache_enabled":true,"verdict":"%s","pool_mb":%s,"free_pct":%s,"wasted_pct":%s,"hit_rate":%s,"num_cached_keys":%s,"max_cached_keys":%s,"num_cached_scripts":%s,"oom_restarts":%s,"fragmented":%s,"self_fixable":%s}' \
             "$sapi" "$phpver" "$([ "$full" = true ] && echo undersized || echo healthy)" \
-            "${pool_mb:-0}" "${free_pct:-0}" "${hit_rate:-0}" "${keys:-0}" "${max_keys:-0}" "${oom:-0}" "$self_fixable")"
+            "${pool_mb:-0}" "${free_pct:-0}" "${wasted_pct:-0}" "${hit_rate:-0}" "${keys:-0}" "${max_keys:-0}" "${scripts:-0}" "${oom:-0}" "$fragmented" "$self_fixable")"
         [ "$full" = true ] && return 1
         return 0
     fi
 
     log_info "Web SAPI: ${sapi:-?}   PHP: ${phpver:-?}"
-    log_info "OPcache pool ${pool_mb}MB, ${free_pct}% free | hit-rate ${hit_rate:-?}% | keys ${keys:-?}/${max_keys:-?} | oom ${oom:-0}"
+    log_info "OPcache pool ${pool_mb}MB, ${free_pct}% free (wasted ${wasted_pct}%) | hit-rate ${hit_rate:-?}% | keys ${keys:-?}/${max_keys:-?} | scripts ${scripts:-?} | oom ${oom:-0}"
     if [ "$hr_low" = true ] && [ "$hr_warm" = false ]; then
-        log_info "(hit-rate ${hit_rate}% not flagged — cache looks cold (${scripts:-?} scripts); cumulative hit-rate is unreliable until warm)"
+        log_info "(hit-rate ${hit_rate}% not flagged — cache still warming (${scripts:-?} scripts < 200); cumulative hit-rate is unreliable until warm)"
     fi
 
     if [ "$full" != true ]; then
@@ -361,19 +374,35 @@ run_probe_opcache() {
     fi
 
     log_error "OPcache is undersized in the web SAPI: ${reasons}"
+
+    # Fragmentation takes priority: sizing up a thrashing pool wastes RAM.
+    if [ "$fragmented" = true ]; then
+        log_warn "High wasted memory (${wasted_pct}%) — this pool is FRAGMENTED by recompiles, not simply too small."
+        log_info "Do this FIRST (before sizing up): opcache_reset() / restart LiteSpeed, and set"
+        log_info "     opcache.validate_timestamps=0 (+ a deploy-time reset hook) to stop the recompile churn."
+        if [ "$self_fixable" != true ]; then
+            log_info "     Note: validate_timestamps is PHP_INI_ALL — often settable via .user.ini even"
+            log_info "     when memory_consumption (PHP_INI_SYSTEM) is locked on shared hosting."
+        fi
+        return 1
+    fi
+
+    # Trigger-specific remediation — name the directive that actually fired.
+    local target_mb files_target
+    target_mb=$(_opc_round_mb "$(( (pool_mb * 2) + 1 ))")
+    files_target=$(_opc_pow2_above "${scripts:-0}")
     if [ "$self_fixable" = true ]; then
-        local target_mb files_target
-        target_mb=$(_opc_round_mb "$(( (pool_mb * 2) + 1 ))")
-        files_target=$(_opc_pow2_above "${scripts:-0}")
-        log_info "Fix (you can write ${LSO_PHP_INI:-the lsphp php.ini}): raise then restart LiteSpeed:"
-        log_info "     opcache.memory_consumption=${target_mb}      # ~2x current ${pool_mb}MB"
-        log_info "     opcache.max_accelerated_files=${files_target} # > ${scripts:-?} cached scripts"
-        log_info "     opcache.interned_strings_buffer=32-64         # if interned was flagged"
-        log_info "     on prod: opcache.validate_timestamps=0 + a deploy-time opcache reset"
+        log_info "Fix (you can write ${LSO_PHP_INI:-the lsphp php.ini}); raise then restart LiteSpeed:"
+        [ "$t_oom" = true ]      && log_info "     opcache.memory_consumption=${target_mb} + opcache.validate_timestamps=0  # stop OOM thrashing"
+        [ "$t_mem" = true ]      && log_info "     opcache.memory_consumption=${target_mb}        # ~2x current ${pool_mb}MB (pool full)"
+        [ "$t_keys" = true ]     && log_info "     opcache.max_accelerated_files=${files_target}  # > ${scripts:-?} cached scripts (PHP rounds to next prime)"
+        [ "$t_interned" = true ] && log_info "     opcache.interned_strings_buffer=32-64          # interned buffer full"
+        [ "$t_hit" = true ]      && log_info "     opcache.memory_consumption=${target_mb} + opcache.max_accelerated_files=${files_target}  # low hit-rate = too small"
     else
-        log_warn "opcache.* are PHP_INI_SYSTEM and not writable here — on shared/managed hosting they"
-        log_warn "are usually not raisable per-account. Contact your host to raise opcache.memory_consumption"
-        log_warn "(current ${pool_mb}MB) / max_accelerated_files; a php.ini snippet you cannot apply would not help."
+        log_warn "opcache.memory_consumption / max_accelerated_files are PHP_INI_SYSTEM and not writable here."
+        log_warn "On shared/managed hosting they are usually not raisable per-account — Contact your host to"
+        log_warn "raise the directive(s) above (pool ${pool_mb}MB); an unappliable php.ini snippet won't help."
+        log_info "     (opcache.validate_timestamps IS PHP_INI_ALL — you may still set it via .user.ini.)"
     fi
     return 1
 }
