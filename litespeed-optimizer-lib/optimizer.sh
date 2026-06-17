@@ -73,7 +73,7 @@ apply_optimizations() {
         directadmin|runcloud)
             panel_restricted=true
             log_warn "${LSO_PANEL}: server config writes are manual-only (panel regenerates configs)"
-            log_warn "Applying php/redis/mariadb/os modules only; server steps will be printed"
+            log_warn "Applying opcache/lscwp/woocommerce/security only; server-tuning/lsapi/lscache steps will be printed for manual application"
             ;;
     esac
 
