@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # Script version
-VERSION="0.6.0"
+VERSION="0.7.0"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -295,6 +295,13 @@ COMMANDS:
                                 redis-server is up but the serving lsphp lacks the
                                 ext, so LSCWP object cache silently uses MySQL.
                                 --basic-auth supported for gated sites.
+    probe-opcache [url]         Read runtime OPcache stats from the WEB SAPI (the
+                                only honest source — CLI has opcache.enable_cli=0):
+                                hit-rate / pool-fill / interned / key-table, with an
+                                undersized verdict. Remediation branches on whether
+                                the lsphp php.ini is writable (self-fix vs contact
+                                host, since opcache.* is PHP_INI_SYSTEM). Same
+                                token-guarded one-shot probe. --json, --basic-auth
     help                        Show this help message
 
 OPTIONS:
@@ -628,6 +635,15 @@ cmd_probe_redis() {
     fi
 }
 
+cmd_probe_opcache() {
+    if type -t run_probe_opcache &>/dev/null; then
+        run_probe_opcache
+    else
+        log_error "Probe library not loaded"
+        exit 1
+    fi
+}
+
 ################################################################################
 # Argument Parsing
 ################################################################################
@@ -637,7 +653,7 @@ parse_arguments() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            detect|check|analyze|optimize|rollback|status|benchmark|probe-redis|export-profile|help)
+            detect|check|analyze|optimize|rollback|status|benchmark|probe-redis|probe-opcache|export-profile|help)
                 COMMAND="$1"
                 shift
                 ;;
@@ -822,6 +838,7 @@ main() {
         status)    cmd_status ;;
         benchmark) cmd_benchmark ;;
         probe-redis) cmd_probe_redis ;;
+        probe-opcache) cmd_probe_opcache ;;
         help)      show_help ;;
         *)
             log_error "Unknown command: $COMMAND"

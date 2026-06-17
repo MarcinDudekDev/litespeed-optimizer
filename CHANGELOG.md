@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0] - 2026-06-17 (web-SAPI OPcache probe)
+
+### Added
+- `probe-opcache` command: reads **runtime** OPcache stats from the actual web SAPI (the only honest source — CLI has `opcache.enable_cli=0`) via the same token-guarded one-shot probe as `probe-redis`. Verdict on agrido's field thresholds — undersized if ANY of: `oom_restarts>0` · pool `<10%` free · key-table `>=95%` of max · interned buffer `<5%` free · hit-rate `<90%` **on a warm cache**. Hit-rate is the only soft trigger and is gated on cache warmth (`num_cached_scripts`), because it's cumulative-since-restart and reads low on a cold cache (normal, not a problem). Remediation is **host-aware** (detect-AND-fix split): if the serving lsphp's php.ini is writable it prints a sizing snippet (memory_consumption ~2×, max_accelerated_files next-pow2 above cached scripts, interned bump, prod `validate_timestamps=0`); otherwise — `opcache.*` is `PHP_INI_SYSTEM` and usually not raisable per-account on shared/managed hosting — it says "contact your host" rather than emit an unappliable snippet. `--json`, `--basic-auth`.
+- Probe template now also reports `opcache_get_status(false)` fields (mem/hit-rate/keys/interned/oom).
+
+### Changed
+- Refactored the drop→fetch→self-delete probe flow into a shared `_probe_fetch_json` harness used by both `probe-redis` and `probe-opcache` (one hardened path, two consumers).
+
+### Tests
+- +8 (243 total): every opcache trigger (healthy / oom / pool<10% / key-table / interned / cold-vs-warm hit-rate / disabled), the host-aware contact-host branch, and `--json` shape — all via canned-JSON responders, deterministic and provider-independent.
+
+### Credit
+- OPcache verdict thresholds + warmth-gating + the host-aware split contributed by the agrido project.
+
 ## [0.6.0] - 2026-06-17 (web-SAPI redis-extension probe)
 
 ### Added

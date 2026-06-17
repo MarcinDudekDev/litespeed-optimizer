@@ -1,17 +1,15 @@
 #!/bin/bash
 ################################################################################
-# probe.sh - Web-SAPI extension probe (probe-redis)
+# probe.sh - Web-SAPI probes (probe-redis, probe-opcache)
 ################################################################################
-# Verifies, in the ACTUAL web SAPI (not CLI php, not wp-cli), whether the lsphp
-# serving a WordPress docroot loads the `redis` PHP extension — the thing LSCWP
-# needs to use Redis as an object cache. redis-server can be up and the CLI php
-# can have phpredis while the WEB SAPI does not, in which case the object cache
-# silently falls back to MySQL. `analyze` raises a CLI-context heuristic for
-# this (lso_php_ext_loaded on the vhost's lsphp); this command CONFIRMS it in
-# the web context and additionally tests server reachability.
+# Reads things that are ONLY observable in the actual web SAPI (not CLI php, not
+# wp-cli), via a token-guarded one-shot HTTP probe:
+#   - probe-redis    : is the `redis` PHP extension loaded + is the server reachable
+#   - probe-opcache  : runtime OPcache hit-rate / pool-fill / interned / key-table
+#                      (CLI has opcache.enable_cli=0, so this is the only honest read)
 #
-# Mechanism (token-guarded one-shot HTTP probe — pattern contributed by the
-# agrido project, validated on Zenbox/LiteSpeed 2026-06-17):
+# Shared mechanism (pattern contributed by the agrido project, validated on
+# Zenbox/LiteSpeed 2026-06-17) — _probe_fetch_json():
 #   1. render a random-named PHP file carrying a per-run hash_equals token
 #   2. drop it in the DOCROOT (NOT wp-content — .htaccess Denies PHP there)
 #   3. fetch over HTTP with the token + a unique cache-buster; the PHP emits
@@ -22,6 +20,7 @@
 #   LSO_PROBE_DOCROOT  - where to drop the probe (default: first WP docroot)
 #   LSO_PROBE_URL      - base URL to fetch (default: positional URL / wp home)
 #   LSO_PROBE_REDIS_HOST / LSO_PROBE_REDIS_PORT - server-reachability target
+#   LSO_OPCACHE_INI_WRITABLE=1 - force the self-fixable remediation branch (tests)
 ################################################################################
 
 # Resolve the docroot to drop the probe into.
@@ -81,54 +80,61 @@ _probe_redis_port() {
     [ -n "$port" ] && printf '%s' "$port" || printf '6379'
 }
 
-run_probe_redis() {
-    local docroot base token name target url tpl bodyfile body http_code rendered
+# Resolve docroot + base URL with consistent error messages.
+# $1 = command label. Sets globals _PROBE_DR / _PROBE_BASE; returns 1 on failure.
+_probe_resolve() {
+    local label="$1"
+    if ! _PROBE_DR=$(_probe_docroot); then
+        log_error "${label}: no WordPress docroot found (set LSO_PROBE_DOCROOT or run where a WP site is detected)"
+        return 1
+    fi
+    if [ ! -d "$_PROBE_DR" ]; then
+        log_error "${label}: docroot is not a directory: $_PROBE_DR"
+        return 1
+    fi
+    if ! _PROBE_BASE=$(_probe_base_url "$_PROBE_DR"); then
+        log_error "${label}: could not determine site URL — pass it: litespeed-optimizer ${label} https://your-site"
+        return 1
+    fi
+    _PROBE_BASE="${_PROBE_BASE%/}"
+    return 0
+}
 
-    if ! docroot=$(_probe_docroot); then
-        log_error "probe-redis: no WordPress docroot found (set LSO_PROBE_DOCROOT or run where a WP site is detected)"
-        return 1
-    fi
-    if [ ! -d "$docroot" ]; then
-        log_error "probe-redis: docroot is not a directory: $docroot"
-        return 1
-    fi
-    if ! base=$(_probe_base_url "$docroot"); then
-        log_error "probe-redis: could not determine site URL — pass it: litespeed-optimizer probe-redis https://your-site"
-        return 1
-    fi
-    base="${base%/}"
+# Shared harness: drop the token-guarded probe, fetch it, self-clean.
+# Args: $1 = docroot, $2 = base URL.
+# Sets: _PROBE_BODY, _PROBE_HTTP, _PROBE_REDIS_HOST, _PROBE_REDIS_PORT.
+# The RETURN trap deletes the dropped file the moment this function returns
+# (body already captured), so callers never see the probe on disk.
+_probe_fetch_json() {
+    local docroot="$1" base="$2"
+    local tpl token name target url rendered bodyfile auth_args
+    _PROBE_BODY=""
+    _PROBE_HTTP="000"
 
     tpl="${TEMPLATE_DIR}/php/probe.php.tpl"
     if [ ! -f "$tpl" ]; then
-        log_error "probe-redis: probe template missing: $tpl"
+        log_error "probe: probe template missing: $tpl"
         return 1
     fi
 
-    local redis_host="${LSO_PROBE_REDIS_HOST:-127.0.0.1}"
-    local redis_port
-    redis_port=$(_probe_redis_port "$docroot")
+    _PROBE_REDIS_HOST="${LSO_PROBE_REDIS_HOST:-127.0.0.1}"
+    _PROBE_REDIS_PORT=$(_probe_redis_port "$docroot")
 
     token=$(_probe_rand_hex 16)
     name="_lso_probe_$(_probe_rand_hex 8).php"
     target="${docroot}/${name}"
     url="${base}/${name}?t=${token}&cb=$$$(_probe_rand_hex 3)"
 
-    if [ "${DRY_RUN:-false}" = true ]; then
-        log_info "[DRY RUN] Would drop ${target}, GET ${base}/${name}?t=<token>&cb=<n>, parse redis_ext, then delete it"
-        return 0
-    fi
-
     # Arm cleanup BEFORE the write so a partial/failed write can't leak an empty
-    # probe into the docroot (rm -f on a not-yet-created path is harmless). The
-    # PHP also self-unlinks; this is the backstop for perms / early-exit edges.
+    # probe into the docroot (rm -f on a not-yet-created path is harmless).
     # shellcheck disable=SC2064
     trap "rm -f '$target' 2>/dev/null || true" RETURN
 
     rendered=$(sed -e "s/{{TOKEN}}/${token}/g" \
-                   -e "s/{{REDIS_HOST}}/${redis_host}/g" \
-                   -e "s/{{REDIS_PORT}}/${redis_port}/g" "$tpl")
+                   -e "s/{{REDIS_HOST}}/${_PROBE_REDIS_HOST}/g" \
+                   -e "s/{{REDIS_PORT}}/${_PROBE_REDIS_PORT}/g" "$tpl")
     if ! printf '%s\n' "$rendered" > "$target" 2>/dev/null; then
-        log_error "probe-redis: cannot write probe into docroot (permissions?): $target"
+        log_error "probe: cannot write probe into docroot (permissions?): $target"
         return 1
     fi
     chmod 644 "$target" 2>/dev/null || true
@@ -136,29 +142,59 @@ run_probe_redis() {
     # Probe output goes to a NON-docroot temp (never momentarily web-accessible).
     bodyfile=$(secure_mktemp "${LSO_DATA_DIR:-${TMPDIR:-/tmp}}/.lso-probe.XXXXXX" 2>/dev/null) \
         || bodyfile="${TMPDIR:-/tmp}/.lso-probe.$$"
-    local auth_args=""
+    auth_args=""
     [ -n "${LSO_HTTP_AUTH:-}" ] && auth_args="--user ${LSO_HTTP_AUTH}"
     # shellcheck disable=SC2086
-    http_code=$(curl -sL -m 15 $auth_args -o "$bodyfile" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
-    body=$(cat "$bodyfile" 2>/dev/null || true)
+    _PROBE_HTTP=$(curl -sL -m 15 $auth_args -o "$bodyfile" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+    _PROBE_BODY=$(cat "$bodyfile" 2>/dev/null || true)
     rm -f "$bodyfile" 2>/dev/null || true
+    return 0
+}
 
-    if [ "$http_code" = "404" ]; then
-        log_error "probe-redis: probe returned 404 — token rejected, or the file was blocked/rewritten before PHP ran"
+# Validate a fetched body is JSON; logs + returns 1 otherwise. $1=label $2=body $3=http
+_probe_body_ok() {
+    local label="$1" body="$2" http="$3"
+    if [ "$http" = "404" ]; then
+        log_error "${label}: probe returned 404 — token rejected, or the file was blocked/rewritten before PHP ran"
         return 1
     fi
     if [ -z "$body" ] || [ "${body#\{}" = "$body" ]; then
-        log_error "probe-redis: no JSON from probe (HTTP ${http_code}). The docroot may not execute PHP at ${base}, or the site needs --basic-auth."
+        log_error "${label}: no JSON from probe (HTTP ${http}). The docroot may not execute PHP, or the site needs --basic-auth."
         return 1
     fi
+    return 0
+}
 
-    # Parse JSON with sed (no jq dependency, matches analyzer conventions).
+# Scalar JSON field (false/null/number/unquoted) — value with quotes/spaces stripped.
+_probe_field() {
+    printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\\([^,}]*\\).*/\\1/p" | tr -d '" '
+}
+# Quoted-string JSON field.
+_probe_str_field() {
+    printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p"
+}
+# Keep only a leading non-negative integer, else empty (set -e safe arithmetic).
+_probe_int() {
+    case "$1" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$1" ;; esac
+}
+
+run_probe_redis() {
+    _probe_resolve probe-redis || return 1
+
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] probe-redis: would drop a token-guarded probe in ${_PROBE_DR}, GET it over HTTP, parse redis_ext, then delete it"
+        return 0
+    fi
+
+    _probe_fetch_json "$_PROBE_DR" "$_PROBE_BASE" || return 1
+    _probe_body_ok probe-redis "$_PROBE_BODY" "$_PROBE_HTTP" || return 1
+
     local one redis_ext redis_server sapi phpver
-    one=$(printf '%s' "$body" | tr -d '\n')
-    redis_ext=$(printf '%s' "$one"    | sed -n 's/.*"redis_ext"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p' | tr -d '" ')
-    redis_server=$(printf '%s' "$one" | sed -n 's/.*"redis_server"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p' | tr -d '" ')
-    sapi=$(printf '%s' "$one"         | sed -n 's/.*"sapi"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    phpver=$(printf '%s' "$one"       | sed -n 's/.*"php_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    one=$(printf '%s' "$_PROBE_BODY" | tr -d '\n')
+    redis_ext=$(_probe_field "$one" redis_ext)
+    redis_server=$(_probe_field "$one" redis_server)
+    sapi=$(_probe_str_field "$one" sapi)
+    phpver=$(_probe_str_field "$one" php_version)
 
     local has_ext=false
     case "$redis_ext" in ''|false|null|0) has_ext=false ;; *) has_ext=true ;; esac
@@ -174,8 +210,8 @@ run_probe_redis() {
     if [ "$has_ext" = true ]; then
         log_success "redis PHP extension IS loaded in the web SAPI (phpredis ${redis_ext}) — object cache can use Redis"
         case "$redis_server" in
-            up)    log_success "Redis server reachable from the web SAPI (${redis_host}:${redis_port})" ;;
-            down)  log_warn "phpredis present but Redis server NOT reachable at ${redis_host}:${redis_port}" ;;
+            up)    log_success "Redis server reachable from the web SAPI (${_PROBE_REDIS_HOST}:${_PROBE_REDIS_PORT})" ;;
+            down)  log_warn "phpredis present but Redis server NOT reachable at ${_PROBE_REDIS_HOST}:${_PROBE_REDIS_PORT}" ;;
             err:*) log_warn "phpredis present but Redis connect errored: ${redis_server#err:}" ;;
         esac
         return 0
@@ -187,6 +223,157 @@ run_probe_redis() {
         local lsphp_tag
         lsphp_tag=$(printf '%s' "$phpver" | cut -d. -f1,2 | tr -d '.')
         log_info "     e.g. apt install lsphp${lsphp_tag}-redis   # match your lsphp package name"
+    fi
+    return 1
+}
+
+# Smallest bucket >= target MB from a sane ladder.
+_opc_round_mb() {
+    local t b
+    t=$(_probe_int "$1"); [ -n "$t" ] || { printf '256'; return; }
+    for b in 64 128 256 512 1024 2048 4096; do
+        if [ "$t" -le "$b" ]; then printf '%s' "$b"; return; fi
+    done
+    printf '%s' "$t"
+}
+# Next power of two strictly above n (floor 1024 — opcache.max_accelerated_files).
+_opc_pow2_above() {
+    local n p=1024
+    n=$(_probe_int "$1"); [ -n "$n" ] || { printf '%s' "$p"; return; }
+    while [ "$p" -le "$n" ]; do
+        p=$((p * 2))
+        [ "$p" -ge 1000000 ] && break
+    done
+    printf '%s' "$p"
+}
+
+run_probe_opcache() {
+    _probe_resolve probe-opcache || return 1
+
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] probe-opcache: would drop a token-guarded probe in ${_PROBE_DR}, GET it over HTTP, read opcache_get_status, then delete it"
+        return 0
+    fi
+
+    _probe_fetch_json "$_PROBE_DR" "$_PROBE_BASE" || return 1
+    _probe_body_ok probe-opcache "$_PROBE_BODY" "$_PROBE_HTTP" || return 1
+
+    local one sapi phpver
+    one=$(printf '%s' "$_PROBE_BODY" | tr -d '\n')
+    sapi=$(_probe_str_field "$one" sapi)
+    phpver=$(_probe_str_field "$one" php_version)
+
+    # opcache is null when the SAPI has no OPcache loaded/enabled.
+    local oc_block
+    oc_block=$(printf '%s' "$one" | sed -n 's/.*"opcache"[[:space:]]*:[[:space:]]*\(.*\)/\1/p')
+    local enabled
+    enabled=$(_probe_field "$one" enabled)
+
+    if [ -z "$oc_block" ] || [ "${oc_block#null}" != "$oc_block" ] || [ "$enabled" = "false" ]; then
+        if [ "${JSON_OUTPUT:-false}" = true ]; then
+            json_output "$(printf '{"command":"probe-opcache","sapi":"%s","php_version":"%s","opcache_enabled":false}' "$sapi" "$phpver")"
+        else
+            log_info  "Web SAPI: ${sapi:-?}   PHP: ${phpver:-?}"
+            log_error "OPcache is NOT enabled in the web SAPI — every request recompiles PHP from source"
+            log_info  "Fix: enable opcache for the serving lsphp (opcache.enable=1) and restart LiteSpeed."
+        fi
+        return 1
+    fi
+
+    # Pull the runtime numbers (bytes for memory; key/script counts; hit_rate %).
+    local mem_used mem_free hit_rate keys max_keys scripts oom interned_free interned_buf
+    mem_used=$(_probe_int "$(_probe_field "$one" mem_used)")
+    mem_free=$(_probe_int "$(_probe_field "$one" mem_free)")
+    hit_rate=$(_probe_field "$one" hit_rate); hit_rate="${hit_rate%%.*}"; hit_rate=$(_probe_int "$hit_rate")
+    keys=$(_probe_int "$(_probe_field "$one" num_cached_keys)")
+    max_keys=$(_probe_int "$(_probe_field "$one" max_cached_keys)")
+    scripts=$(_probe_int "$(_probe_field "$one" num_cached_scripts)")
+    oom=$(_probe_int "$(_probe_field "$one" oom_restarts)")
+    interned_free=$(_probe_int "$(_probe_field "$one" interned_free)")
+    interned_buf=$(_probe_int "$(_probe_field "$one" interned_buffer)")
+
+    # ---- Verdict (agrido field thresholds) -------------------------------------
+    # FULL/undersized if ANY hard trigger fires; hit_rate is a SOFT trigger and is
+    # only trusted on a WARM cache (cumulative-since-restart -> cold cache reads
+    # low and that is NORMAL, not a problem). num_cached_scripts is the warmth proxy.
+    local full=false reasons="" free_pct=-1 pool_mb=0
+    if [ -n "$mem_used" ] && [ -n "$mem_free" ] && [ "$((mem_used + mem_free))" -gt 0 ]; then
+        local total=$((mem_used + mem_free))
+        free_pct=$(( mem_free * 100 / total ))
+        pool_mb=$(( total / 1048576 ))
+    fi
+
+    if [ -n "$oom" ] && [ "$oom" -gt 0 ]; then
+        full=true; reasons="${reasons}; oom_restarts=${oom} (cache thrashing/restarting under load)"
+    fi
+    if [ "$free_pct" -ge 0 ] && [ "$free_pct" -lt 10 ]; then
+        full=true; reasons="${reasons}; pool ${free_pct}% free (<10%, ${pool_mb}MB)"
+    fi
+    if [ -n "$keys" ] && [ -n "$max_keys" ] && [ "$max_keys" -gt 0 ]; then
+        # keys >= 95% of max_keys (key-table saturated — mem can look free)
+        if [ "$(( keys * 100 / max_keys ))" -ge 95 ]; then
+            full=true; reasons="${reasons}; key-table ${keys}/${max_keys} (>=95%, no script slots)"
+        fi
+    fi
+    if [ -n "$interned_free" ] && [ -n "$interned_buf" ] && [ "$interned_buf" -gt 0 ]; then
+        if [ "$(( interned_free * 100 / interned_buf ))" -lt 5 ]; then
+            full=true; reasons="${reasons}; interned-strings buffer <5% free (string dedup spills)"
+        fi
+    fi
+    local hr_warm=false hr_low=false
+    if [ -n "$scripts" ] && [ "$scripts" -ge 50 ]; then hr_warm=true; fi
+    if [ -n "$hit_rate" ] && [ "$hit_rate" -lt 90 ]; then hr_low=true; fi
+    if [ "$hr_warm" = true ] && [ "$hr_low" = true ]; then
+        full=true; reasons="${reasons}; hit-rate ${hit_rate}% (<90% on a warm cache)"
+    fi
+    reasons="${reasons#; }"
+
+    # ---- Host-aware remediation (detect-AND-fix split) -------------------------
+    # opcache.* are PHP_INI_SYSTEM: on shared/managed hosting they are often NOT
+    # raisable per-account. Emitting an unappliable php.ini snippet is worse than
+    # honest — so branch on whether we can actually write the serving lsphp's ini.
+    local self_fixable=false
+    if [ -n "${LSO_OPCACHE_INI_WRITABLE:-}" ]; then
+        [ "${LSO_OPCACHE_INI_WRITABLE}" = "1" ] && self_fixable=true
+    elif [ -n "${LSO_PHP_INI:-}" ] && [ -w "${LSO_PHP_INI:-}" ]; then
+        self_fixable=true
+    elif [ -n "${LSO_PHP_INI_SCAN_DIR:-}" ] && [ -w "${LSO_PHP_INI_SCAN_DIR:-}" ]; then
+        self_fixable=true
+    fi
+
+    if [ "${JSON_OUTPUT:-false}" = true ]; then
+        json_output "$(printf '{"command":"probe-opcache","sapi":"%s","php_version":"%s","opcache_enabled":true,"verdict":"%s","pool_mb":%s,"free_pct":%s,"hit_rate":%s,"num_cached_keys":%s,"max_cached_keys":%s,"oom_restarts":%s,"self_fixable":%s}' \
+            "$sapi" "$phpver" "$([ "$full" = true ] && echo undersized || echo healthy)" \
+            "${pool_mb:-0}" "${free_pct:-0}" "${hit_rate:-0}" "${keys:-0}" "${max_keys:-0}" "${oom:-0}" "$self_fixable")"
+        [ "$full" = true ] && return 1
+        return 0
+    fi
+
+    log_info "Web SAPI: ${sapi:-?}   PHP: ${phpver:-?}"
+    log_info "OPcache pool ${pool_mb}MB, ${free_pct}% free | hit-rate ${hit_rate:-?}% | keys ${keys:-?}/${max_keys:-?} | oom ${oom:-0}"
+    if [ "$hr_low" = true ] && [ "$hr_warm" = false ]; then
+        log_info "(hit-rate ${hit_rate}% not flagged — cache looks cold (${scripts:-?} scripts); cumulative hit-rate is unreliable until warm)"
+    fi
+
+    if [ "$full" != true ]; then
+        log_success "OPcache healthy in the web SAPI — no undersizing signals"
+        return 0
+    fi
+
+    log_error "OPcache is undersized in the web SAPI: ${reasons}"
+    if [ "$self_fixable" = true ]; then
+        local target_mb files_target
+        target_mb=$(_opc_round_mb "$(( (pool_mb * 2) + 1 ))")
+        files_target=$(_opc_pow2_above "${scripts:-0}")
+        log_info "Fix (you can write ${LSO_PHP_INI:-the lsphp php.ini}): raise then restart LiteSpeed:"
+        log_info "     opcache.memory_consumption=${target_mb}      # ~2x current ${pool_mb}MB"
+        log_info "     opcache.max_accelerated_files=${files_target} # > ${scripts:-?} cached scripts"
+        log_info "     opcache.interned_strings_buffer=32-64         # if interned was flagged"
+        log_info "     on prod: opcache.validate_timestamps=0 + a deploy-time opcache reset"
+    else
+        log_warn "opcache.* are PHP_INI_SYSTEM and not writable here — on shared/managed hosting they"
+        log_warn "are usually not raisable per-account. Contact your host to raise opcache.memory_consumption"
+        log_warn "(current ${pool_mb}MB) / max_accelerated_files; a php.ini snippet you cannot apply would not help."
     fi
     return 1
 }
