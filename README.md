@@ -23,6 +23,14 @@ Sibling project of [nginx-optimizer](https://github.com/MarcinDudekDev/nginx-opt
 
 **Features applied by `optimize`**: RAM-tier `tuning{}` · LSAPI sizing with the `maxConns == PHP_LSAPI_CHILDREN` invariant · OPcache drop-in · server-level LSCache safety config (`enableCache 0` — LSCWP drives caching) · LSCWP plugin install + CVE gate (≥6.5.1) + curated option profiles (validated against plugin 7.8.1 source) · Redis object-cache wiring (lifetime 600) · WooCommerce ESI (Enterprise) / warn+fallback (OLS) + crawler · per-client throttling + WordPressProtect.
 
+## Benchmarks & live demo
+
+LiteSpeed (OpenLiteSpeed + LSCache + lsphp 8.3 + MariaDB) was benchmarked head-to-head against a matched **FrankenPHP/Caddy** WooCommerce stack on equivalent hardware. Even with FrankenPHP in worker mode, **LiteSpeed was ~25% faster on uncached render and ~6.6× faster on the cart path** — the gap is engine/SAPI-level, not a process-model artifact. Methodology + per-pass probes:
+
+- [Pass-2 report](docs/reports/litespeed-vs-frankenphp-pass2.html) · [Pass-3 report — matched worker mode](docs/reports/litespeed-vs-frankenphp-pass3.html)
+
+**Live LiteSpeed reference:** [litespeed-demo.marcindudek.dev](https://litespeed-demo.marcindudek.dev) — a 500-product WooCommerce store on the real stack (LSCWP full-page cache + Redis); cached pages return in single-digit milliseconds (`x-litespeed-cache: hit`).
+
 ## Install
 
 ```bash

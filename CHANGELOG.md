@@ -58,6 +58,10 @@
 
 ## [Unreleased] - pilot harness
 
+### Docs / findings
+- LiteSpeed vs FrankenPHP benchmark (`docs/reports/`, Pass-2 + Pass-3 matched worker mode): LiteSpeed ~25% faster on uncached render and ~6.6× faster on the cart path; the gap is engine/SAPI-level, not a process-model artifact. The public LiteSpeed reference demo (litespeed-demo.marcindudek.dev) was rebuilt as a real-stack UltrafastWoo WooCommerce clone (LSCWP full-page cache + Redis, 500 products) to serve as the matched counterpart.
+- ROADMAP v0.2+ — two new analyzer checks queued from the demo build: (1) **web-SAPI Redis-extension probe** — object-cache readiness must be judged in the *serving* lsphp (`extension_loaded('redis')` over HTTP), not from `redis-server` presence or CLI php; a web lsphp without the ext makes LSCWP object cache silently fall back to MySQL while `analyze` reports "on". (2) **block-vs-shortcode Cart/Checkout guard** — a block-based cart/checkout renders the empty-cart fallback when WC block rendering is stripped by a perf layer, so an HTTP-200 smoke test passes while checkout is broken; detect `wp:woocommerce/cart`/`checkout` and warn.
+
 ### Added
 - tests/pilot-restore.sh: restore an arbitrary WordPress export (files+DB) into a local OLS+MariaDB+Redis stack, URL search-replace to a .loc domain, wp-cli admin access. Client data stays local (gitignored)
 - tests/pilot-report.sh: drive analyze(before)/optimize/analyze(after)/benchmark/cart-isolation against the restore + generate the no-SSH export-profile artifact; writes docs/PILOT-REPORT.md (gitignored)
