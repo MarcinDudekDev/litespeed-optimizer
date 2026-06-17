@@ -68,6 +68,19 @@ _probe_rand_hex() {
     fi
 }
 
+# Best-effort Redis port: LSCWP/redis-cache drop-ins frequently run Redis on a
+# NON-default port (e.g. 7074), so a hard-coded 6379 reachability probe reports
+# a false "down" on those boxes. Read WP_REDIS_PORT from the object-cache drop-in
+# or wp-config before defaulting. Arg $1 = docroot. (agrido review)
+_probe_redis_port() {
+    if [ -n "${LSO_PROBE_REDIS_PORT:-}" ]; then printf '%s' "$LSO_PROBE_REDIS_PORT"; return 0; fi
+    local docroot="$1" port=""
+    port=$(grep -hiE 'WP_REDIS_PORT' \
+              "${docroot}/wp-content/object-cache.php" "${docroot}/wp-config.php" 2>/dev/null \
+           | grep -oE '[0-9]{2,5}' | head -1 || true)
+    [ -n "$port" ] && printf '%s' "$port" || printf '6379'
+}
+
 run_probe_redis() {
     local docroot base token name target url tpl bodyfile body http_code rendered
 
@@ -92,7 +105,8 @@ run_probe_redis() {
     fi
 
     local redis_host="${LSO_PROBE_REDIS_HOST:-127.0.0.1}"
-    local redis_port="${LSO_PROBE_REDIS_PORT:-6379}"
+    local redis_port
+    redis_port=$(_probe_redis_port "$docroot")
 
     token=$(_probe_rand_hex 16)
     name="_lso_probe_$(_probe_rand_hex 8).php"
@@ -104,6 +118,12 @@ run_probe_redis() {
         return 0
     fi
 
+    # Arm cleanup BEFORE the write so a partial/failed write can't leak an empty
+    # probe into the docroot (rm -f on a not-yet-created path is harmless). The
+    # PHP also self-unlinks; this is the backstop for perms / early-exit edges.
+    # shellcheck disable=SC2064
+    trap "rm -f '$target' 2>/dev/null || true" RETURN
+
     rendered=$(sed -e "s/{{TOKEN}}/${token}/g" \
                    -e "s/{{REDIS_HOST}}/${redis_host}/g" \
                    -e "s/{{REDIS_PORT}}/${redis_port}/g" "$tpl")
@@ -113,11 +133,9 @@ run_probe_redis() {
     fi
     chmod 644 "$target" 2>/dev/null || true
 
-    # Backstop cleanup: the PHP self-unlinks, this covers perms / early-exit edges.
-    # shellcheck disable=SC2064
-    trap "rm -f '$target' 2>/dev/null || true" RETURN
-
-    bodyfile=$(secure_mktemp "${LSO_DATA_DIR:-/tmp}/.lso-probe.XXXXXX" 2>/dev/null) || bodyfile="${target}.out"
+    # Probe output goes to a NON-docroot temp (never momentarily web-accessible).
+    bodyfile=$(secure_mktemp "${LSO_DATA_DIR:-${TMPDIR:-/tmp}}/.lso-probe.XXXXXX" 2>/dev/null) \
+        || bodyfile="${TMPDIR:-/tmp}/.lso-probe.$$"
     local auth_args=""
     [ -n "${LSO_HTTP_AUTH:-}" ] && auth_args="--user ${LSO_HTTP_AUTH}"
     # shellcheck disable=SC2086

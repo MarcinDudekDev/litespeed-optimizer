@@ -16,6 +16,12 @@ if (!isset($_GET['t']) || !hash_equals($TOKEN, (string) $_GET['t'])) {
     http_response_code(404);
     exit;
 }
+// Guarantee CLEAN JSON regardless of the host's php.ini: a box with
+// display_errors on (or a host auto_prepend_file) would otherwise prepend a
+// notice/warning before the body, making the response non-JSON and tripping the
+// driver's "starts with {" guard even though valid JSON follows. (agrido review)
+error_reporting(0);
+ini_set('display_errors', '0');
 // CRITICAL: stop LiteSpeed/LSCache caching the probe (else a 2nd fetch = stale HIT).
 header('X-LiteSpeed-Cache-Control: no-cache');
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -36,7 +42,8 @@ if (extension_loaded('redis')) {
         $out['redis_server'] = $r->connect('{{REDIS_HOST}}', (int) '{{REDIS_PORT}}', 1.0) ? 'up' : 'down';
         $r->close();
     } catch (Throwable $e) {
-        $out['redis_server'] = 'err:' . substr($e->getMessage(), 0, 40);
+        // Strip , { } so the driver's [^,}] JSON capture can't truncate mid-value.
+        $out['redis_server'] = 'err:' . str_replace(array(',', '{', '}'), ' ', substr($e->getMessage(), 0, 40));
     }
 }
 
