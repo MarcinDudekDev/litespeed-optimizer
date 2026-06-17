@@ -2033,10 +2033,10 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
     OPC_DR="${TEST_TMP}/opc-docroot"; mkdir -p "$OPC_DR"
     MB=1048576
-    # opcache JSON body: args = mem_used mem_free hit_rate keys scripts oom interned_free
+    # opcache JSON body: args = mem_used mem_free hit_rate keys scripts oom interned_free [mem_wasted]
     opc_body() {
-        printf '{"php_version":"8.3.10","sapi":"litespeed","opcache":{"enabled":true,"mem_used":%d,"mem_free":%d,"hit_rate":%s,"num_cached_keys":%d,"max_cached_keys":16229,"num_cached_scripts":%d,"oom_restarts":%d,"interned_used":1000,"interned_free":%d,"interned_buffer":67108864}}' \
-            "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+        printf '{"php_version":"8.3.10","sapi":"litespeed","opcache":{"enabled":true,"mem_used":%d,"mem_free":%d,"mem_wasted":%d,"hit_rate":%s,"num_cached_keys":%d,"max_cached_keys":16229,"num_cached_scripts":%d,"oom_restarts":%d,"interned_used":1000,"interned_free":%d,"interned_buffer":67108864}}' \
+            "$1" "$2" "${8:-1048576}" "$3" "$4" "$5" "$6" "$7"
     }
     # run probe-opcache against a canned body; sets OPC_OUT / OPC_EXIT. $1 port $2 body $3 writable
     opc_run() {
@@ -2071,10 +2071,19 @@ PYEOF
 
     # Cold cache with a low hit-rate must NOT alarm (cumulative hit-rate, warmth gate)
     opc_run 18923 "$(opc_body $((60*MB)) $((68*MB)) 40.0 200 10 0 $((40*MB)))" 1
-    if echo "$OPC_OUT" | grep -q "OPcache healthy" && echo "$OPC_OUT" | grep -qi "cold" && [ "${OPC_EXIT:-1}" = "0" ]; then
+    if echo "$OPC_OUT" | grep -q "OPcache healthy" && echo "$OPC_OUT" | grep -qi "warming" && [ "${OPC_EXIT:-1}" = "0" ]; then
         log_pass "probe-opcache: low hit-rate on COLD cache not flagged (warmth gate)"
     else
         log_fail "probe-opcache: cold-cache warmth gate failed: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # Warming WP (60 scripts, hit 80) must NOT flag — gate is 200, not 50 (agrido:
+    # a real WP caches hundreds of scripts within the first page loads).
+    opc_run 18928 "$(opc_body $((60*MB)) $((68*MB)) 80.0 1000 60 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "OPcache healthy" && [ "${OPC_EXIT:-1}" = "0" ]; then
+        log_pass "probe-opcache: warming WP (60 scripts) not flagged by hit-rate (gate=200)"
+    else
+        log_fail "probe-opcache: warming-WP false-flagged: $(echo "$OPC_OUT" | tr -d '\n')"
     fi
 
     # Warm cache + low hit-rate -> soft trigger fires
@@ -2083,6 +2092,22 @@ PYEOF
         log_pass "probe-opcache: low hit-rate on WARM cache -> undersized (soft trigger)"
     else
         log_fail "probe-opcache: warm low-hit trigger missed: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # Key-table-only trigger names the RIGHT directive (max_accelerated_files, not memory)
+    opc_run 18929 "$(opc_body $((60*MB)) $((68*MB)) 99.0 15500 800 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "opcache.max_accelerated_files=" && ! echo "$OPC_OUT" | grep -q "opcache.memory_consumption="; then
+        log_pass "probe-opcache: key-table trigger -> max_accelerated_files only (trigger-specific fix)"
+    else
+        log_fail "probe-opcache: key-table remediation not trigger-specific: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # Fragmentation: low free + HIGH wasted -> reset/validate_timestamps FIRST, not a blind size-up
+    opc_run 18930 "$(opc_body $((90*MB)) $((5*MB)) 99.0 1000 800 0 $((40*MB)) $((38*MB)))" 1
+    if echo "$OPC_OUT" | grep -qi "FRAGMENTED" && echo "$OPC_OUT" | grep -q "validate_timestamps=0" && [ "${OPC_EXIT:-0}" != "0" ]; then
+        log_pass "probe-opcache: high wasted memory -> fragmentation branch (reset before sizing)"
+    else
+        log_fail "probe-opcache: fragmentation branch missed: $(echo "$OPC_OUT" | tr -d '\n')"
     fi
 
     # Host-aware remediation: not self-fixable -> contact-host, no php.ini snippet
