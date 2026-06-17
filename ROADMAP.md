@@ -2,7 +2,7 @@
 
 Canonical spec: docs/research/SPEC.md
 
-## v0.1 (in progress)
+## v0.1 — MVP (complete; shipped through v0.4.0–v0.5.0)
 - [x] Phase 1 — scaffold + detect + confedit + backup/rollback (foundation)
 - [x] Phase 2 — server tuning: tuning{}, lsapi-tuning, opcache, security; golden tests per RAM tier; Docker OLS E2E
 - [x] Phase 3 — WordPress/WooCommerce: lscache, LSCWP curated profiles, redis wiring, woocommerce (ESI policy/crawler)
