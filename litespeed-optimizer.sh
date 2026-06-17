@@ -59,16 +59,16 @@ EXCLUDE_FEATURE=""
 PROFILE="auto"
 TARGET_SITE=""
 
-# Allowed feature names / aliases for --feature and --exclude
+# Allowed feature names / aliases for --feature and --exclude.
+# These are the 7 REGISTERED features (lib/features/*.sh); keep this list in
+# sync with feature_register calls. Roadmap-only features (http3, redis-tuning,
+# mariadb, os-limits) are intentionally NOT here — accepting them would pass
+# validation and then fail at apply with "Feature not available".
 ALLOWED_FEATURES=(
     "server-tuning" "tuning"
     "lsapi-tuning" "lsapi" "php-workers"
     "opcache" "php"
     "lscache" "cache"
-    "http3" "quic"
-    "redis"
-    "mariadb" "db" "mysql"
-    "os-limits" "limits" "sysctl"
     "lscwp" "plugin"
     "woocommerce" "woo"
     "security" "headers" "throttling"
@@ -305,18 +305,18 @@ OPTIONS:
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
-FEATURES (v0.1 roadmap):
+FEATURES (use with --feature / --exclude):
     server-tuning               tuning{} block (maxConnections, keepalive, brotli)
     lsapi-tuning                LSAPI External App (PHP children, AVOID_FORK)
     opcache                     PHP OPcache sizing
-    lscache                     LSCache module / CacheRoot configuration
-    http3                       HTTP/3 (QUIC) verification + firewall check
-    redis                       Redis object cache tuning
-    mariadb                     MariaDB/InnoDB buffer pool sizing
-    os-limits                   systemd LimitNOFILE + sysctl tuning
+    lscache                     server-level LSCache safety config
     lscwp                       LiteSpeed Cache plugin + curated profile import
+                                (incl. Redis object-cache wiring when present)
     woocommerce                 ESI, crawler, WooCommerce cache checks
     security                    Throttling, headers, xmlrpc, CVE checks
+
+    Planned (not yet implemented; see ROADMAP.md): http3 · redis tuning ·
+    mariadb buffer pool · os-limits (systemd/sysctl)
 
 EXAMPLES:
     # Detect environment (edition, panel, paths)
@@ -454,7 +454,7 @@ cmd_check() {
             ;;
         directadmin|runcloud)
             log_warn "${LSO_PANEL} detected — server config writes are MANUAL-STEPS-ONLY"
-            log_warn "  (panel regeneration clobbers direct edits; only php/redis/mariadb/os applied)"
+            log_warn "  (panel regeneration clobbers direct edits; server-tuning/lsapi/lscache become manual steps — opcache/lscwp/woocommerce/security still apply)"
             warnings=$((warnings + 1))
             ;;
     esac
