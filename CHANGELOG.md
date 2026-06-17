@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0] - 2026-06-17 (web-SAPI redis-extension probe)
+
+### Added
+- `probe-redis` command: token-guarded one-shot web-SAPI probe. Renders a random-named PHP file with a per-run `hash_equals` token, drops it in the **docroot** (not wp-content — LiteSpeed `.htaccess` Denies PHP there), fetches it over HTTP with a cache-buster while the PHP emits `X-LiteSpeed-Cache-Control: no-cache` (so LSCache can't serve a stale HIT), parses `extension_loaded('redis')` + Redis server reachability in the **actual web SAPI**, then self-deletes (with a backstop filesystem rm). `--json` and `--basic-auth` supported; `LSO_PROBE_DOCROOT`/`LSO_PROBE_URL` override seams for tests. Probe mechanism contributed by the agrido project (token guard + LSCache-bust + self-delete, validated on Zenbox/LiteSpeed).
+- `analyze` objcache check now flags when the **vhost's resolved lsphp** (per the b4fe352 fix, not wp-cli's php) lacks the `redis` extension — the silent "redis-server is up but LSCWP object cache falls back to MySQL" failure mode confirmed on lsdemo. CLI-context heuristic that points at `probe-redis` for web-context confirmation; stays silent (no score skew) when the binary can't be executed (e.g. fixture mode).
+- `lso_php_ext_loaded` helper (lib/core/helpers.sh): does the vhost lsphp build load a given PHP extension? `LSO_PHP_MODULES` test seam.
+- `templates/php/probe.php.tpl` + `litespeed-optimizer-lib/probe.sh`.
+
+### Tests
+- 12 new (235 total): redis-ext analyze findings (present/missing/undeterminable + FIX hint), and `probe-redis` end-to-end against PHP's built-in server (missing verdict, token-guard 404, no-cache header, self-delete) plus a canned-JSON path (present verdict, `--json` shape, backstop cleanup).
+
 ## [0.1.0] - 2026-06-10 (Phase 1)
 
 ### Added

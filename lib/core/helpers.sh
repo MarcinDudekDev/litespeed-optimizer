@@ -87,6 +87,34 @@ copy_file_ownership() {
 }
 
 ################################################################################
+# PHP environment probes
+################################################################################
+
+# Does the vhost's resolved lsphp build load a given PHP extension?
+# Checks the lsphp the VHOST actually runs (LSO_PHP_BIN, resolved per the
+# b4fe352 fix) — NOT wp-cli's php. The two can be different binaries/builds,
+# which is exactly how an object cache silently falls back to MySQL: redis-server
+# is up and CLI php has the ext, but the serving lsphp does not.
+# Test seam: LSO_PHP_MODULES (space-separated module list), when set, short-
+# circuits execution so fixture runs (whose php stubs are non-executable) are
+# deterministic — mirrors the LSO_RAM_MB / WP_MOCK_* override convention.
+# Returns: 0 = loaded, 1 = not loaded, 2 = undeterminable (cannot exec binary)
+lso_php_ext_loaded() {
+    local ext="$1"
+    if [ -n "${LSO_PHP_MODULES+x}" ]; then
+        case " $LSO_PHP_MODULES " in
+            *" $ext "*) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    [ -n "${LSO_PHP_BIN:-}" ] && [ -x "${LSO_PHP_BIN}" ] || return 2
+    if "$LSO_PHP_BIN" -m 2>/dev/null | grep -qiE "^${ext}$"; then
+        return 0
+    fi
+    return 1
+}
+
+################################################################################
 # Checksums / Timestamps (cross-platform)
 ################################################################################
 

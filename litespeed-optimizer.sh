@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # Script version
-VERSION="0.5.0"
+VERSION="0.6.0"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -247,7 +247,7 @@ source_libraries() {
 
     # 4. Workflow libraries
     local lib
-    for lib in ui detector backup validator analyzer remote-analyzer optimizer benchmark exporter; do
+    for lib in ui detector backup validator analyzer remote-analyzer optimizer benchmark exporter probe; do
         local lib_file="${LIB_DIR}/${lib}.sh"
         if [ -f "$lib_file" ]; then
             # shellcheck source=/dev/null
@@ -289,6 +289,12 @@ COMMANDS:
     rollback --list             List available backups
     status [site]               Show which optimizations are applied
     benchmark <url>             Before/after TTFB + cache-hit check (Phase 4)
+    probe-redis [url]           Verify the redis PHP extension in the WEB SAPI
+                                (token-guarded one-shot probe dropped in docroot,
+                                fetched over HTTP, self-deletes). Catches the case
+                                redis-server is up but the serving lsphp lacks the
+                                ext, so LSCWP object cache silently uses MySQL.
+                                --basic-auth supported for gated sites.
     help                        Show this help message
 
 OPTIONS:
@@ -300,8 +306,8 @@ OPTIONS:
     -q, --quiet                 Suppress informational output (for scripting)
     --verbose                   Show detailed technical output
     --json                      Output JSON (detect, status commands)
-    --basic-auth <user:pass>    Send HTTP Basic Auth on remote/benchmark requests
-                                (for staging behind a Basic Auth gate)
+    --basic-auth <user:pass>    Send HTTP Basic Auth on remote/benchmark/probe-redis
+                                requests (for staging behind a Basic Auth gate)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -613,6 +619,15 @@ cmd_benchmark() {
     fi
 }
 
+cmd_probe_redis() {
+    if type -t run_probe_redis &>/dev/null; then
+        run_probe_redis
+    else
+        log_error "Probe library not loaded"
+        exit 1
+    fi
+}
+
 ################################################################################
 # Argument Parsing
 ################################################################################
@@ -622,7 +637,7 @@ parse_arguments() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            detect|check|analyze|optimize|rollback|status|benchmark|export-profile|help)
+            detect|check|analyze|optimize|rollback|status|benchmark|probe-redis|export-profile|help)
                 COMMAND="$1"
                 shift
                 ;;
@@ -806,6 +821,7 @@ main() {
         rollback)  cmd_rollback "$TARGET_SITE" ;;
         status)    cmd_status ;;
         benchmark) cmd_benchmark ;;
+        probe-redis) cmd_probe_redis ;;
         help)      show_help ;;
         *)
             log_error "Unknown command: $COMMAND"

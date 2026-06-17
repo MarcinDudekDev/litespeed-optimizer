@@ -12,7 +12,7 @@ Sibling project of [nginx-optimizer](https://github.com/MarcinDudekDev/nginx-opt
 [![lint: shellcheck](https://img.shields.io/badge/lint-shellcheck-brightgreen.svg)](https://www.shellcheck.net/)
 [![bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-lightgrey.svg)](#requirements)
 
-**v0.5.0** — phases 1–4 complete (detect · tune · WordPress/WooCommerce · security/analyze/benchmark) plus the v0.2 no-SSH workflows (`analyze --remote`, `export-profile`). Runs on a live server today; see the [roadmap](ROADMAP.md) for what's next.
+**v0.6.0** — phases 1–4 complete (detect · tune · WordPress/WooCommerce · security/analyze/benchmark) plus the no-SSH workflows (`analyze --remote`, `export-profile`) and the web-SAPI `probe-redis` verifier. Runs on a live server today; see the [roadmap](ROADMAP.md) for what's next.
 
 **Contents:** [Commands](#commands) · [Compatibility](#compatibility) · [Benchmarks](#benchmarks--live-demo) · [Install](#install) · [Usage](#usage) · [Example output](#example-output) · [Safety model](#safety-model) · [Troubleshooting](#troubleshooting) · [Uninstall](#uninstall) · [Testing](#testing) · [Requirements](#requirements) · [Security & contributing](#security--contributing)
 
@@ -27,6 +27,7 @@ Sibling project of [nginx-optimizer](https://github.com/MarcinDudekDev/nginx-opt
 | `rollback <ts>` / `--list` | Verified restore: files back, checksum verification, graceful restart, HTTP health check, auto-restore on failure |
 | `status` | Which optimizations are applied (registry detect loop) |
 | `benchmark <url>` | TTFB ×10 (dns/connect/tls), first-vs-warm median, `x-litespeed-cache: hit` verification, cart no-cache probe, before/after history |
+| `probe-redis [url]` | Verifies the `redis` PHP extension in the **actual web SAPI** (not CLI/wp-cli php) via a token-guarded one-shot probe dropped in the docroot, fetched over HTTP, self-deleting. Catches "redis-server is up but the serving lsphp lacks the ext → LSCWP object cache silently falls back to MySQL". `--json`, `--basic-auth` |
 | `analyze --remote <url>` | HTTP-only remote audit (no server access): cache/TTFB/HTTP3/compression/security + Woo cart-safety probes incl. two-session isolation. GET-only, anonymous, rate-limited — only on sites you own/manage |
 | `export-profile` | LSCWP-native `.data` settings file for wp-admin Toolbox import (no SSH) — verified against plugin 7.8.1 |
 

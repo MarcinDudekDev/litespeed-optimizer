@@ -382,6 +382,21 @@ run_analyze() {
     # Redis presence (server-side)
     if [ "${LSO_HAS_REDIS:-false}" = true ]; then
         _az_check 4 objcache "Redis present" pass ""
+
+        # Daemon up != usable object cache. The lsphp the VHOST runs can lack the
+        # `redis` PHP extension even when redis-server is up and the CLI php has
+        # it — LSCWP then silently falls back to MySQL while the daemon check
+        # above still reads green (confirmed on lsdemo: lsphp83 web SAPI had no
+        # redis ext). Probe the vhost's resolved lsphp, not wp-cli's php. This is
+        # a CLI-context heuristic on the right build; `probe-redis` verifies it in
+        # the actual web SAPI. Undeterminable (can't exec the binary, e.g. fixture
+        # mode) adds no finding so it never skews the score.
+        if lso_php_ext_loaded redis; then
+            _az_check 3 objcache "redis PHP extension present in vhost lsphp${LSO_PHP_VER:+ $LSO_PHP_VER}" pass ""
+        elif [ "$?" = 1 ]; then
+            _az_check 3 objcache "redis PHP extension MISSING from vhost lsphp${LSO_PHP_VER:+ $LSO_PHP_VER} — object cache silently falls back to MySQL" fail \
+                "install it for the serving lsphp (e.g. apt install lsphp${LSO_PHP_VER//./}-redis), restart, then verify in the web context: litespeed-optimizer probe-redis"
+        fi
     else
         _az_check 4 objcache "Redis not installed — no object cache backend" fail "apt install redis-server, then optimize --feature lscwp"
     fi
