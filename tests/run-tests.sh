@@ -1328,6 +1328,46 @@ else
     log_fail "analyze --json malformed"
 fi
 
+# Web-SAPI redis-extension CLI heuristic (hybrid half): when redis-server is
+# present, analyze must additionally flag whether the *vhost's* lsphp build
+# carries the redis PHP extension. LSO_PHP_MODULES is the fixture seam (the
+# fixture php stub is non-executable, so `php -m` cannot be run for real).
+az_redis_ok=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \
+    LSO_PHP_MODULES="Core opcache redis" \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+if echo "$az_redis_ok" | grep -q "redis PHP extension present in vhost lsphp"; then
+    log_pass "analyze: redis ext present in vhost lsphp -> pass finding"
+else
+    log_fail "analyze: redis-ext-present finding missing"
+fi
+
+az_redis_miss=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \
+    LSO_PHP_MODULES="Core opcache" \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+if echo "$az_redis_miss" | grep -q "redis PHP extension MISSING from vhost lsphp"; then
+    log_pass "analyze: redis ext missing from vhost lsphp -> fail finding"
+else
+    log_fail "analyze: redis-ext-missing finding not raised"
+fi
+if echo "$az_redis_miss" | grep -q "probe-redis"; then
+    log_pass "analyze: redis-ext-missing FIX points at probe-redis"
+else
+    log_fail "analyze: redis-ext-missing FIX hint missing probe-redis"
+fi
+
+# Undeterminable seam: with no LSO_PHP_MODULES the fixture php stub is not
+# executable, so analyze must add NEITHER redis-ext finding (never skews score).
+az_redis_unk=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+if echo "$az_redis_unk" | grep -qE "redis PHP extension (present|MISSING)"; then
+    log_fail "analyze: redis-ext finding appeared when undeterminable (seam leak)"
+else
+    log_pass "analyze: redis-ext check silent when undeterminable (fixture php non-exec)"
+fi
+
 ################################################################################
 # SECTION 17: Benchmark (local test server)
 ################################################################################
@@ -1850,6 +1890,134 @@ if echo "$ba_bad" | grep -qi "requires user:password"; then
     log_pass "--basic-auth rejects malformed value"
 else
     log_fail "--basic-auth accepted malformed value"
+fi
+
+################################################################################
+# SECTION 22: probe-redis (web-SAPI redis-extension probe)
+################################################################################
+log_section "probe-redis Tests"
+
+# Part A — faithful end-to-end with PHP's built-in server executing the REAL
+# token-guarded probe. The runner's php MAY or MAY NOT carry the redis ext
+# (GitHub ubuntu-latest ships it; macOS may not), so we assert the verdict is
+# COHERENT with the exit code rather than a fixed outcome. Token-404, no-cache
+# header, and one-shot self-delete are all environment-independent.
+if command -v php &>/dev/null; then
+    PR_DOCROOT="${TEST_TMP}/probe-docroot"
+    mkdir -p "$PR_DOCROOT"
+    PR_PORT=18917
+    php -S "127.0.0.1:${PR_PORT}" -t "$PR_DOCROOT" >/dev/null 2>&1 &
+    PHP_PID=$!
+    sleep 1
+
+    pr_out=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$PR_DOCROOT" \
+        LSO_PROBE_URL="http://127.0.0.1:${PR_PORT}" \
+        "${OPTIMIZER}" probe-redis 2>&1; echo "EXIT:$?")
+    pr_exit=$(echo "$pr_out" | sed -n 's/^EXIT:\([0-9]*\)$/\1/p')
+
+    # present verdict <=> exit 0 ; missing verdict <=> nonzero exit
+    pr_coherent=false
+    if echo "$pr_out" | grep -q "IS loaded in the web SAPI"  && [ "${pr_exit:-1}" = "0" ]; then pr_coherent=true; fi
+    if echo "$pr_out" | grep -q "NOT loaded in the web SAPI" && [ "${pr_exit:-0}" != "0" ]; then pr_coherent=true; fi
+    if [ "$pr_coherent" = true ]; then
+        log_pass "probe-redis: real web SAPI -> verdict coherent with exit code (exit ${pr_exit})"
+    else
+        log_fail "probe-redis: verdict/exit incoherent: $(echo "$pr_out" | tail -3)"
+    fi
+
+    if ! ls "$PR_DOCROOT"/_lso_probe_*.php >/dev/null 2>&1; then
+        log_pass "probe-redis: one-shot probe self-deleted (docroot clean)"
+    else
+        log_fail "probe-redis: probe file lingered in docroot"
+    fi
+
+    # Token guard + cache-bust: render the template by hand, verify the PHP itself
+    # 404s a wrong token and emits LSCache no-cache headers for the right one.
+    PR_TOK="deadbeefdeadbeefdeadbeefdeadbeef"
+    sed -e "s/{{TOKEN}}/${PR_TOK}/g" -e "s/{{REDIS_HOST}}/127.0.0.1/g" -e "s/{{REDIS_PORT}}/6379/g" \
+        templates/php/probe.php.tpl > "$PR_DOCROOT/_guard.php"
+    pr_code_bad=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PR_PORT}/_guard.php?t=wrong" 2>/dev/null || echo 000)
+    pr_hdrs=$(curl -s -D - -o /dev/null "http://127.0.0.1:${PR_PORT}/_guard.php?t=${PR_TOK}&cb=1" 2>/dev/null || true)
+    kill "$PHP_PID" 2>/dev/null || true
+
+    if [ "$pr_code_bad" = "404" ]; then
+        log_pass "probe-redis: token guard 404s a wrong token"
+    else
+        log_fail "probe-redis: wrong token did not 404 (got ${pr_code_bad})"
+    fi
+    if echo "$pr_hdrs" | grep -qi "x-litespeed-cache-control: no-cache"; then
+        log_pass "probe-redis: probe emits LSCache no-cache header (anti-stale)"
+    else
+        log_fail "probe-redis: no-cache header missing from probe response"
+    fi
+else
+    log_skip "php unavailable — probe-redis live-server tests skipped"
+fi
+
+# Part B — BOTH verdicts deterministically, independent of the runner's php
+# build, via a canned-JSON responder parametrized present|missing.
+if command -v python3 &>/dev/null; then
+    PR_SRV="${TEST_TMP}/probe_server.py"
+    cat > "$PR_SRV" <<'PYEOF'
+import sys, http.server
+MODE = sys.argv[2]  # "present" | "missing"
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if MODE == "present":
+            body = b'{"php_version":"8.3.10","sapi":"litespeed","redis_ext":"5.3.7","igbinary":true,"redis_server":"up"}'
+        else:
+            body = b'{"php_version":"8.3.10","sapi":"litespeed","redis_ext":false,"igbinary":false,"redis_server":null}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PYEOF
+    PRJ_DOCROOT="${TEST_TMP}/probe-docroot-json"
+    mkdir -p "$PRJ_DOCROOT"
+
+    # present -> redis_ext:true, exit 0, file cleaned
+    python3 "$PR_SRV" 18918 present &
+    PRJ_PID=$!
+    sleep 1
+    prj=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$PRJ_DOCROOT" \
+        LSO_PROBE_URL="http://127.0.0.1:18918" \
+        "${OPTIMIZER}" probe-redis --json 2>/dev/null; echo "EXIT:$?")
+    prj_exit=$(echo "$prj" | sed -n 's/^EXIT:\([0-9]*\)$/\1/p')
+    kill "$PRJ_PID" 2>/dev/null || true
+
+    if echo "$prj" | grep -qE '"redis_ext":[[:space:]]*true' && \
+       echo "$prj" | grep -qE '"redis_server":[[:space:]]*"up"' && [ "${prj_exit:-1}" = "0" ]; then
+        log_pass "probe-redis --json: present ext -> redis_ext:true, redis_server:up, exit 0"
+    else
+        log_fail "probe-redis --json present malformed: $(echo "$prj" | tr -d '\n')"
+    fi
+    if ! ls "$PRJ_DOCROOT"/_lso_probe_*.php >/dev/null 2>&1; then
+        log_pass "probe-redis: probe file cleaned on success path (backstop trap)"
+    else
+        log_fail "probe-redis: probe lingered on success path"
+    fi
+
+    # missing -> human verdict + nonzero exit (deterministic, no real php needed)
+    python3 "$PR_SRV" 18919 missing &
+    PRM_PID=$!
+    sleep 1
+    prm=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$PRJ_DOCROOT" \
+        LSO_PROBE_URL="http://127.0.0.1:18919" \
+        "${OPTIMIZER}" probe-redis 2>&1; echo "EXIT:$?")
+    prm_exit=$(echo "$prm" | sed -n 's/^EXIT:\([0-9]*\)$/\1/p')
+    kill "$PRM_PID" 2>/dev/null || true
+
+    if echo "$prm" | grep -q "NOT loaded in the web SAPI" && [ "${prm_exit:-0}" != "0" ]; then
+        log_pass "probe-redis: missing ext -> MISSING verdict + nonzero exit (${prm_exit})"
+    else
+        log_fail "probe-redis: missing-ext verdict not raised: $(echo "$prm" | tr -d '\n')"
+    fi
+else
+    log_skip "python3 unavailable — probe-redis --json tests skipped"
 fi
 
 ################################################################################
