@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.5] - 2026-06-18 (graceful lsphp recycle — prevent torn object-cache writes)
+
+### Fixed
+- **lsphp recycle is now graceful (SIGTERM → grace → SIGKILL stragglers), not a blanket `kill -9`.** The #112 recycle hard-killed every worker immediately. Caught live on lsdemo: a `-9` landing between WordPress committing an option to the DB and the object-cache (Redis) write of the updated `alloptions` blob completing left the two diverged — the DB had the correct active theme but Redis served the OLD one, so the site rendered the wrong (default) theme until the object cache was flushed. The recycle now sends SIGTERM so each worker finishes its current request (and any in-flight cache write) before exiting, waits `LSO_RECYCLE_GRACE` seconds (default 2), then SIGKILLs only workers still alive — so a busy/stuck worker is still guaranteed to recycle, but a normal request is never torn mid-write. LSWS respawns workers on demand either way.
+
+### Tests
+- +1 (259 total): the recycle unit test now asserts SIGTERM reaches every worker first and SIGKILL escalates ONLY to stragglers that ignored TERM (a worker that exits on TERM must not be -9'd).
+
 ## [0.7.4] - 2026-06-18 (probe correctness on multi-vhost + warming caches — live lsdemo)
 
 Two bugs found running `probe-opcache` against the live lsdemo box right after the #112 recycle.

@@ -125,12 +125,23 @@ _lso_lsphp_pids() {
 # Force-recycle lsphp worker processes so a freshly-written php.ini/OPcache
 # drop-in takes effect in the WEB SAPI immediately. A graceful LiteSpeed restart
 # (SIGUSR1) does NOT recycle existing lsphp children — they keep serving the OLD
-# config until they cycle on their own. We kill them by PID; LSWS respawns on
+# config until they cycle on their own. We recycle them by PID; LSWS respawns on
 # demand, loading the new config. (Confirmed live on lsdemo 2026-06-17.)
+#
+# CRITICAL — recycle GRACEFULLY (SIGTERM first, SIGKILL only stragglers):
+# a hard SIGKILL mid-request can tear an in-flight write. Observed live on lsdemo
+# (2026-06-18): a -9 between WordPress committing an option to the DB and the
+# object-cache (Redis) write of the updated `alloptions` blob completing left the
+# two diverged — DB had the right active theme, Redis served the OLD one, so the
+# site rendered the wrong (default) theme until the object cache was flushed.
+# SIGTERM lets each worker finish its current request (and any in-flight cache
+# write) before exiting; only workers still alive after the grace window are
+# SIGKILLed, so the recycle stays guaranteed without tearing requests.
 # Honors DRY_RUN and LSO_SKIP_RESTART/LSO_FS_ROOT (fixture/test mode).
+# Grace window: LSO_RECYCLE_GRACE seconds (default 2).
 lso_recycle_lsphp() {
     if [ "${DRY_RUN:-false}" = true ]; then
-        log_info "[DRY RUN] Would recycle lsphp worker(s) to load new php.ini/OPcache config"
+        log_info "[DRY RUN] Would gracefully recycle lsphp worker(s) to load new php.ini/OPcache config"
         return 0
     fi
     if [ "${LSO_SKIP_RESTART:-0}" = "1" ] || [ -n "${LSO_FS_ROOT:-}" ]; then
@@ -145,11 +156,23 @@ lso_recycle_lsphp() {
         return 0
     fi
 
+    # Phase 1 — SIGTERM: ask each worker to finish its current request and exit.
     for pid in $pids; do
-        kill -9 "$pid" 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
         count=$((count + 1))
     done
-    log_success "Recycled ${count} lsphp worker(s) — new php.ini/OPcache config now live in web SAPI"
+
+    # Let workers drain in-flight requests before we force anything.
+    sleep "${LSO_RECYCLE_GRACE:-2}"
+
+    # Phase 2 — SIGKILL only the stragglers still alive (busy/stuck), so the
+    # recycle is still guaranteed even if a worker ignored SIGTERM.
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    log_success "Recycled ${count} lsphp worker(s) gracefully — new php.ini/OPcache config now live in web SAPI"
 }
 
 ################################################################################
