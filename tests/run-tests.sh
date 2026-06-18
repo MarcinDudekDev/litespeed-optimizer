@@ -843,7 +843,7 @@ log_section "lsphp Recycle After OPcache Apply"
 
 # 1. Dry-run emits the would-recycle preview (reachable: opcache apply runs in
 #    --dry-run preview). Reuses $dr_out from the dry-run optimize above.
-if echo "$dr_out" | grep -q "\[DRY RUN\] Would recycle lsphp"; then
+if echo "$dr_out" | grep -q "\[DRY RUN\] Would gracefully recycle lsphp"; then
     log_pass "opcache recycle: --dry-run prints Would-recycle preview"
 else
     log_fail "opcache recycle: Would-recycle preview missing"
@@ -862,8 +862,12 @@ else
     log_pass "opcache recycle: fixture run did not recycle"
 fi
 
-# 3. Kill path (unit): override the PID seam and shadow `kill` so no real process
-#    is signalled. Asserts every PID is killed and the count is reported.
+# 3. Graceful recycle (unit): override the PID seam and shadow `kill` so no real
+#    process is signalled. Verifies SIGTERM goes to EVERY worker first, and only
+#    stragglers still alive after the grace window get SIGKILLed — a worker that
+#    exits on TERM must NOT be -9'd (that hard kill mid-request is what tore the
+#    Redis object-cache write and regressed the demo theme on lsdemo 2026-06-18).
+#    Emulation: pid 4242 exits on SIGTERM (kill -0 -> dead); 4343 ignores it.
 recycle_out=$(
     log_info() { echo "$*"; }
     log_success() { echo "$*"; }
@@ -873,14 +877,30 @@ recycle_out=$(
     unset LSO_FS_ROOT
     LSO_SKIP_RESTART=0
     DRY_RUN=false
+    LSO_RECYCLE_GRACE=0
     _lso_lsphp_pids() { printf '%s\n' 4242 4343; }
-    kill() { echo "KILLED $*"; }
+    kill() {
+        echo "KILL $*"
+        if [ "$1" = "-0" ]; then
+            # liveness probe: 4242 already exited on TERM, 4343 still alive
+            [ "$2" = "4242" ] && return 1
+            return 0
+        fi
+        return 0
+    }
     lso_recycle_lsphp
 )
-if echo "$recycle_out" | grep -q "KILLED -9 4242" && echo "$recycle_out" | grep -q "KILLED -9 4343"; then
-    log_pass "lso_recycle_lsphp: signals every lsphp PID (-9)"
+# SIGTERM (bare signal) must reach BOTH workers first.
+if echo "$recycle_out" | grep -qx "KILL 4242" && echo "$recycle_out" | grep -qx "KILL 4343"; then
+    log_pass "lso_recycle_lsphp: SIGTERM sent to every worker first (graceful)"
 else
-    log_fail "lso_recycle_lsphp: did not signal expected PIDs: $recycle_out"
+    log_fail "lso_recycle_lsphp: graceful SIGTERM not sent to all: $recycle_out"
+fi
+# Only the straggler (4343) escalates to SIGKILL; the one that exited on TERM must not.
+if echo "$recycle_out" | grep -q "KILL -9 4343" && ! echo "$recycle_out" | grep -q "KILL -9 4242"; then
+    log_pass "lso_recycle_lsphp: SIGKILL only the straggler, not the graceful exit"
+else
+    log_fail "lso_recycle_lsphp: escalation wrong (must -9 only survivors): $recycle_out"
 fi
 if echo "$recycle_out" | grep -q "Recycled 2 lsphp worker"; then
     log_pass "lso_recycle_lsphp: reports recycled count"
