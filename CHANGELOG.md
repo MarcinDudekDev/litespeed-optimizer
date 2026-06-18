@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.4] - 2026-06-18 (probe correctness on multi-vhost + warming caches — live lsdemo)
+
+Two bugs found running `probe-opcache` against the live lsdemo box right after the #112 recycle.
+
+### Fixed
+- **`probe-opcache` / `probe-redis` resolve the docroot from the requested URL.** On a multi-vhost box the probe dropped its token file in `LSO_WP_SITES[0]` (the first detected WP site) regardless of the URL, so the HTTP fetch 404'd whenever that wasn't the vhost serving the URL. `_probe_docroot` now prefers the WP site whose own `home` host matches the requested URL host (falls back to the first site when no URL is given; `LSO_PROBE_DOCROOT` still wins). Verified live: `probe-opcache https://litespeed-demo.marcindudek.dev` went from 404 to a correct read.
+- **Low OPcache hit-rate no longer false-flags a mostly-free pool as "undersized".** The soft hit-rate trigger fired on `scripts>=200 && hit_rate<90` with no memory-pressure check, so a freshly-recycled / low-traffic pool (the exact optimize→probe workflow) reported "undersized — raise memory_consumption" against a pool that was 79% **free**. It now requires real eviction pressure: hit-rate `< 90` **and** `>= 50` (below 50 misses still dominate = warming) **and** the pool actually under pressure (`free < 30%` or OOM). The remediation for a genuine hit-rate trigger now recommends memory only (the misses are evictions), not a `max_accelerated_files` value that could sit below the current setting. The same memory-pressure gate is applied to the `analyze` opcache hit-rate check for consistency.
+
+### Tests
+- +6 (258 total): multi-vhost docroot selection (URL-host match / no-URL fallback / explicit override); probe healthy on a free pool with low hit-rate; probe healthy post-recycle (hit<50%); probe still undersized when low hit-rate coincides with memory pressure; analyze healthy on a free pool with low hit-rate.
+
 ## [0.7.3] - 2026-06-18 (lsphp recycle after php.ini/OPcache changes — lsdemo #112)
 
 ### Fixed

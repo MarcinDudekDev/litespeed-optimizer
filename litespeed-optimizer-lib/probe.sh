@@ -23,27 +23,56 @@
 #   LSO_OPCACHE_INI_WRITABLE=1 - force the self-fixable remediation branch (tests)
 ################################################################################
 
+# Bare hostname from a URL/home string: strip scheme, path, port, leading www.
+# Lowercased so host comparisons are case-insensitive.
+_probe_url_host() {
+    printf '%s' "$1" \
+        | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/.*$##; s#:[0-9]+$##; s#^www\.##' \
+        | tr '[:upper:]' '[:lower:]'
+}
+
+# The explicitly-requested probe URL (override or positional), if any. Does NOT
+# fall back to wp home — that lookup depends on the docroot we are still choosing.
+_probe_target_url() {
+    if [ -n "${LSO_PROBE_URL:-}" ]; then printf '%s' "$LSO_PROBE_URL"; return 0; fi
+    if [ -n "${TARGET_SITE:-}" ] && printf '%s' "$TARGET_SITE" | grep -qE '^https?://'; then
+        printf '%s' "$TARGET_SITE"; return 0
+    fi
+    return 1
+}
+
 # Resolve the docroot to drop the probe into.
+# When a URL is requested on a MULTI-VHOST box, the first detected WP docroot is
+# usually NOT the one that serves that URL — dropping the probe there yields a 404
+# at the fetch URL. So prefer the WP site whose own `home` host matches the URL
+# host; only fall back to the first site when nothing matches (or no URL given).
 _probe_docroot() {
     if [ -n "${LSO_PROBE_DOCROOT:-}" ]; then
         printf '%s' "$LSO_PROBE_DOCROOT"
         return 0
     fi
-    if [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
-        printf '%s' "${LSO_WP_SITES[0]}"
-        return 0
+    [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ] || return 1
+
+    local want_host
+    want_host=$(_probe_url_host "$(_probe_target_url 2>/dev/null)")
+    if [ -n "$want_host" ] && type -t lso_wp &>/dev/null \
+       && type -t _lscwp_have_wpcli &>/dev/null && _lscwp_have_wpcli; then
+        local d h
+        for d in "${LSO_WP_SITES[@]}"; do
+            h=$(_probe_url_host "$(lso_wp "$d" option get home 2>/dev/null | tr -d '\r')")
+            if [ -n "$h" ] && [ "$h" = "$want_host" ]; then
+                printf '%s' "$d"
+                return 0
+            fi
+        done
     fi
-    return 1
+    printf '%s' "${LSO_WP_SITES[0]}"
+    return 0
 }
 
 # Resolve the base URL the probe is fetched from. Arg $1 = docroot (for wp-cli).
 _probe_base_url() {
-    if [ -n "${LSO_PROBE_URL:-}" ]; then
-        printf '%s' "$LSO_PROBE_URL"
-        return 0
-    fi
-    if [ -n "${TARGET_SITE:-}" ] && printf '%s' "$TARGET_SITE" | grep -qE '^https?://'; then
-        printf '%s' "$TARGET_SITE"
+    if _probe_target_url; then
         return 0
     fi
     local docroot="$1" home=""
@@ -327,11 +356,28 @@ run_probe_opcache() {
             full=true; t_interned=true; reasons="${reasons}; interned-strings buffer <5% free (string dedup spills)"
         fi
     fi
-    local hr_warm=false hr_low=false
+    # The soft hit-rate trigger means "undersized" ONLY when the misses are
+    # plausibly caused by EVICTION — otherwise a bigger pool can't raise the rate.
+    # Three independent corroborators, all required:
+    #   hr_warm   — enough scripts cached (>=200). num_cached_scripts is a weak
+    #               warmth proxy on its own (one page load compiles 1000+ scripts).
+    #   hr_trust  — hit_rate >= 50. Since misses ≈ num_cached_scripts, "hits
+    #               outnumber misses" (rate trustworthy) reduces algebraically to
+    #               hit_rate >= 50; below that, misses dominate = still warming
+    #               after a flush/recycle (the optimize→probe workflow), not small.
+    #   hr_press  — the pool is actually under memory pressure (free_pct < 30 or
+    #               OOM). With a mostly-FREE pool and no OOM nothing is being
+    #               evicted, so a low rate is warming/low-traffic — raising
+    #               memory_consumption would do nothing. (Builds on agrido's gate.)
+    local hr_warm=false hr_low=false hr_trust=false hr_press=false
     if [ -n "$scripts" ] && [ "$scripts" -ge 200 ]; then hr_warm=true; fi
     if [ -n "$hit_rate" ] && [ "$hit_rate" -lt 90 ]; then hr_low=true; fi
-    if [ "$hr_warm" = true ] && [ "$hr_low" = true ]; then
-        full=true; t_hit=true; reasons="${reasons}; hit-rate ${hit_rate}% (<90% on a warm cache)"
+    if [ -n "$hit_rate" ] && [ "$hit_rate" -ge 50 ]; then hr_trust=true; fi
+    if { [ "$free_pct" -ge 0 ] && [ "$free_pct" -lt 30 ]; } || { [ -n "$oom" ] && [ "$oom" -gt 0 ]; }; then
+        hr_press=true
+    fi
+    if [ "$hr_warm" = true ] && [ "$hr_low" = true ] && [ "$hr_trust" = true ] && [ "$hr_press" = true ]; then
+        full=true; t_hit=true; reasons="${reasons}; hit-rate ${hit_rate}% (<90% on a warm cache under memory pressure)"
     fi
     reasons="${reasons#; }"
 
@@ -364,8 +410,14 @@ run_probe_opcache() {
 
     log_info "Web SAPI: ${sapi:-?}   PHP: ${phpver:-?}"
     log_info "OPcache pool ${pool_mb}MB, ${free_pct}% free (wasted ${wasted_pct}%) | hit-rate ${hit_rate:-?}% | keys ${keys:-?}/${max_keys:-?} | scripts ${scripts:-?} | oom ${oom:-0}"
-    if [ "$hr_low" = true ] && [ "$hr_warm" = false ]; then
-        log_info "(hit-rate ${hit_rate}% not flagged — cache still warming (${scripts:-?} scripts < 200); cumulative hit-rate is unreliable until warm)"
+    if [ "$hr_low" = true ] && [ "$t_hit" = false ]; then
+        if [ "$hr_warm" = false ]; then
+            log_info "(hit-rate ${hit_rate}% not flagged — cache still warming (${scripts:-?} scripts < 200); cumulative hit-rate is unreliable until warm)"
+        elif [ "$hr_trust" = false ]; then
+            log_info "(hit-rate ${hit_rate}% not flagged — below 50% means misses still dominate (cache warming after a flush/recycle); cumulative hit-rate is untrustworthy until hits outnumber misses)"
+        else
+            log_info "(hit-rate ${hit_rate}% not flagged — pool is ${free_pct}% free with no OOM, so misses aren't from eviction; a bigger pool can't raise the rate — likely warming or low repeat traffic)"
+        fi
     fi
 
     if [ "$full" != true ]; then
@@ -397,7 +449,7 @@ run_probe_opcache() {
         [ "$t_mem" = true ]      && log_info "     opcache.memory_consumption=${target_mb}        # ~2x current ${pool_mb}MB (pool full)"
         [ "$t_keys" = true ]     && log_info "     opcache.max_accelerated_files=${files_target}  # > ${scripts:-?} cached scripts (PHP rounds to next prime)"
         [ "$t_interned" = true ] && log_info "     opcache.interned_strings_buffer=32-64          # interned buffer full"
-        [ "$t_hit" = true ]      && log_info "     opcache.memory_consumption=${target_mb} + opcache.max_accelerated_files=${files_target}  # low hit-rate = too small"
+        [ "$t_hit" = true ]      && log_info "     opcache.memory_consumption=${target_mb}        # low hit-rate under memory pressure = evictions"
     else
         log_warn "opcache.memory_consumption / max_accelerated_files are PHP_INI_SYSTEM and not writable here."
         log_warn "On shared/managed hosting they are usually not raisable per-account — Contact your host to"

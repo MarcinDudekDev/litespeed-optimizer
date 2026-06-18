@@ -969,6 +969,9 @@ case "$args" in
         #   healthy = plenty of headroom
         if [ "${WP_MOCK_OPCACHE:-healthy}" = "full" ]; then
             echo '{"used":131000000,"free":2000000,"wasted":500000,"hits":690,"misses":310,"hit_rate":69,"interned_free":1024,"keys":18000,"max_keys":20000}'
+        elif [ "${WP_MOCK_OPCACHE:-}" = "freehit" ]; then
+            # warming/low-traffic: 79% pool free, no pressure, but hit-rate 75% (<95)
+            echo '{"used":110000000,"free":402000000,"wasted":100000,"hits":750,"misses":250,"hit_rate":75,"interned_free":8388608,"keys":1300,"max_keys":50000}'
         elif [ "${WP_MOCK_OPCACHE:-}" = "null" ]; then
             # the real CLI case: opcache.enable_cli=0 -> null memory stats
             echo '{"used":null,"free":null,"wasted":null,"hits":null,"misses":null,"hit_rate":null,"interned_free":null,"keys":null,"max_keys":null}'
@@ -1837,6 +1840,19 @@ else
     log_fail "opcache: healthy stats wrongly flagged"
 fi
 
+# Low hit-rate but pool MOSTLY FREE (79%) -> must NOT fail "increase memory"
+# (nothing is being evicted; mirrors the probe-opcache memory-pressure gate).
+oc_freehit=$(WP_MOCK_OPCACHE=freehit LSO_WP_BIN="$MOCK_WP" \
+    LSO_DATA_DIR="$OC_DATA" LSO_FS_ROOT="$OC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OC_FIX/etc/php.d" \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+if echo "$oc_freehit" | grep -qi "hit-rate 75%.*free headroom" && \
+   ! echo "$oc_freehit" | grep -qi "hit-rate 75%.*recompil"; then
+    log_pass "opcache: low hit-rate on a free pool not flagged as undersized (analyze)"
+else
+    log_fail "opcache: free-pool low-hit wrongly flagged (analyze): $(echo "$oc_freehit" | grep -i hit-rate | head -2)"
+fi
+
 # The real-world CLI case: null memory stats (enable_cli=0) must NOT crash the
 # audit (the pilot caught $(( )) aborting on null) — analyze must reach SCORE.
 oc_null=$(WP_MOCK_OPCACHE=null LSO_WP_BIN="$MOCK_WP" \
@@ -1942,6 +1958,80 @@ if echo "$ba_bad" | grep -qi "requires user:password"; then
     log_pass "--basic-auth rejects malformed value"
 else
     log_fail "--basic-auth accepted malformed value"
+fi
+
+################################################################################
+# SECTION 21b: probe docroot resolution on multi-vhost boxes (issue: 404)
+################################################################################
+log_section "Probe Docroot Resolution (multi-vhost)"
+
+# On a box with several WP sites, a probe URL must drop its file in the docroot
+# of the vhost that SERVES that URL — not just LSO_WP_SITES[0]. Otherwise the
+# fetch 404s (file in docroot A, URL maps to docroot B). _probe_docroot() must
+# pick the site whose WP `home` host matches the requested URL host.
+probe_dr_out=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/probe.sh"
+    # Three detected sites; the requested URL belongs to the SECOND one.
+    LSO_WP_SITES=("/srv/alpha" "/srv/bravo" "/srv/charlie")
+    _lscwp_have_wpcli() { return 0; }
+    lso_wp() {
+        # $1 = docroot; emulate "wp option get home" per site.
+        # (if/elif, not case: bash 3.2 mis-parses case inside $())
+        if [ "$1" = "/srv/alpha" ]; then echo "https://alpha.example.com"
+        elif [ "$1" = "/srv/bravo" ]; then echo "https://litespeed-demo.marcindudek.dev"
+        elif [ "$1" = "/srv/charlie" ]; then echo "http://charlie.example.com"
+        fi
+    }
+    # Requested via positional URL (TARGET_SITE), www-prefixed + trailing path to
+    # exercise host normalization.
+    TARGET_SITE="https://www.litespeed-demo.marcindudek.dev/wp-login.php"
+    _probe_docroot
+)
+if [ "$probe_dr_out" = "/srv/bravo" ]; then
+    log_pass "probe docroot: matches URL host to the serving vhost (/srv/bravo)"
+else
+    log_fail "probe docroot: picked '$probe_dr_out', expected /srv/bravo"
+fi
+
+# No URL given → fall back to the first detected site (legacy behavior).
+probe_dr_fallback=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/probe.sh"
+    LSO_WP_SITES=("/srv/alpha" "/srv/bravo")
+    _lscwp_have_wpcli() { return 0; }
+    lso_wp() { echo ""; }
+    unset TARGET_SITE LSO_PROBE_URL
+    _probe_docroot
+)
+if [ "$probe_dr_fallback" = "/srv/alpha" ]; then
+    log_pass "probe docroot: no URL -> falls back to first site"
+else
+    log_fail "probe docroot: fallback picked '$probe_dr_fallback', expected /srv/alpha"
+fi
+
+# Explicit LSO_PROBE_DOCROOT override always wins.
+probe_dr_override=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/probe.sh"
+    LSO_WP_SITES=("/srv/alpha" "/srv/bravo")
+    LSO_PROBE_DOCROOT="/srv/explicit"
+    TARGET_SITE="https://litespeed-demo.marcindudek.dev"
+    _probe_docroot
+)
+if [ "$probe_dr_override" = "/srv/explicit" ]; then
+    log_pass "probe docroot: LSO_PROBE_DOCROOT override wins"
+else
+    log_fail "probe docroot: override picked '$probe_dr_override', expected /srv/explicit"
 fi
 
 ################################################################################
@@ -2145,12 +2235,35 @@ PYEOF
         log_fail "probe-opcache: warming-WP false-flagged: $(echo "$OPC_OUT" | tr -d '\n')"
     fi
 
-    # Warm cache + low hit-rate -> soft trigger fires
-    opc_run 18924 "$(opc_body $((60*MB)) $((68*MB)) 80.0 1000 500 0 $((40*MB)))" 1
-    if echo "$OPC_OUT" | grep -q "hit-rate 80% (<90% on a warm cache)" && [ "${OPC_EXIT:-0}" != "0" ]; then
-        log_pass "probe-opcache: low hit-rate on WARM cache -> undersized (soft trigger)"
+    # Warm cache + low hit-rate + pool UNDER PRESSURE (15% free) -> soft trigger
+    # fires (misses plausibly from eviction). free 15% is <30 (pressure) but >=10
+    # (not the hard pool-full trigger), isolating the hit-rate trigger.
+    opc_run 18924 "$(opc_body $((108*MB)) $((20*MB)) 80.0 1000 500 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "hit-rate 80% (<90% on a warm cache under memory pressure)" && [ "${OPC_EXIT:-0}" != "0" ]; then
+        log_pass "probe-opcache: low hit-rate on WARM cache under pressure -> undersized"
     else
         log_fail "probe-opcache: warm low-hit trigger missed: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # Warm + trustworthy-but-mediocre hit-rate (66%) but pool MOSTLY FREE (79%) and
+    # no OOM -> NOT flagged: nothing is being evicted, a bigger pool can't help.
+    # (This is the exact live lsdemo case that previously false-flagged "undersized
+    # raise memory_consumption=2048" against a 79%-free pool.)
+    opc_run 18932 "$(opc_body $((110*MB)) $((414*MB)) 66.0 1293 1259 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "OPcache healthy" && echo "$OPC_OUT" | grep -qi "bigger pool can't raise the rate" && [ "${OPC_EXIT:-1}" = "0" ]; then
+        log_pass "probe-opcache: low hit-rate on a mostly-free pool not flagged (no eviction)"
+    else
+        log_fail "probe-opcache: free-pool low-hit false-flagged: $(echo "$OPC_OUT" | tr -d '\n')"
+    fi
+
+    # Warming AFTER a recycle: many scripts cached (>=200) but hit-rate <50% means
+    # misses still dominate (one compile per script, few repeat hits yet) and the
+    # pool is mostly free -> must NOT flag (this is the optimize->probe workflow).
+    opc_run 18931 "$(opc_body $((70*MB)) $((442*MB)) 0.0 1259 1259 0 $((40*MB)))" 1
+    if echo "$OPC_OUT" | grep -q "OPcache healthy" && echo "$OPC_OUT" | grep -qi "misses still dominate" && [ "${OPC_EXIT:-1}" = "0" ]; then
+        log_pass "probe-opcache: warm-by-count but hit<50% (post-recycle) not flagged"
+    else
+        log_fail "probe-opcache: post-recycle warming false-flagged: $(echo "$OPC_OUT" | tr -d '\n')"
     fi
 
     # Key-table-only trigger names the RIGHT directive (max_accelerated_files, not memory)

@@ -231,11 +231,22 @@ run_analyze() {
                 fi
             fi
 
-            # Hit-rate < 95% = cache too small / churning
+            # Hit-rate < 95% suggests churn — but it is only "too small / increase
+            # memory" when the pool is actually under pressure (free < 30%). With a
+            # mostly-free pool nothing is being evicted, so a low hit-rate is warming
+            # or low repeat traffic and a bigger pool can't raise it (mirrors
+            # probe-opcache's memory-pressure gate; avoids "raise memory" advice
+            # against a 79%-free pool).
             if [ -n "$oc_hr" ]; then
-                if [ "$oc_hr" -lt 95 ]; then
-                    _az_check 3 opcache "OPcache hit-rate ${oc_hr}% (<95%) — recompiling scripts that should be cached" fail \
+                local oc_press=false
+                if [ -n "$oc_used" ] && [ -n "$oc_free" ] && [ "$((oc_used + oc_free))" -gt 0 ]; then
+                    if [ "$(( oc_free * 100 / (oc_used + oc_free) ))" -lt 30 ]; then oc_press=true; fi
+                fi
+                if [ "$oc_hr" -lt 95 ] && [ "$oc_press" = true ]; then
+                    _az_check 3 opcache "OPcache hit-rate ${oc_hr}% (<95%) under memory pressure — evictions recompile scripts that should be cached" fail \
                         "increase opcache.memory_consumption and opcache.max_accelerated_files (LSO_OPCACHE_MB=<bigger> optimize --feature opcache)"
+                elif [ "$oc_hr" -lt 95 ]; then
+                    _az_check 3 opcache "OPcache hit-rate ${oc_hr}% (<95%) but pool has free headroom — likely warming / low repeat traffic, not undersized" pass ""
                 else
                     _az_check 3 opcache "OPcache hit-rate ${oc_hr}% (>=95%)" pass ""
                 fi
