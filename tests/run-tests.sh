@@ -836,6 +836,58 @@ else
     log_fail "Enterprise: opcache drop-in missing"
 fi
 
+################################################################################
+# SECTION 12b: lsphp recycle after OPcache apply (issue #112)
+################################################################################
+log_section "lsphp Recycle After OPcache Apply"
+
+# 1. Dry-run emits the would-recycle preview (reachable: opcache apply runs in
+#    --dry-run preview). Reuses $dr_out from the dry-run optimize above.
+if echo "$dr_out" | grep -q "\[DRY RUN\] Would recycle lsphp"; then
+    log_pass "opcache recycle: --dry-run prints Would-recycle preview"
+else
+    log_fail "opcache recycle: Would-recycle preview missing"
+fi
+
+# 2. Real (non-dry) apply on a fixture tree (LSO_FS_ROOT set) must SKIP the
+#    recycle — never signal a real process. Reuses $ent_out (real optimize run).
+if echo "$ent_out" | grep -q "lsphp recycle skipped (fixture/test mode)"; then
+    log_pass "opcache recycle: fixture run skips recycle"
+else
+    log_fail "opcache recycle: fixture-skip line missing"
+fi
+if echo "$ent_out" | grep -q "Recycled .* lsphp worker"; then
+    log_fail "opcache recycle: fixture run actually recycled (must not)"
+else
+    log_pass "opcache recycle: fixture run did not recycle"
+fi
+
+# 3. Kill path (unit): override the PID seam and shadow `kill` so no real process
+#    is signalled. Asserts every PID is killed and the count is reported.
+recycle_out=$(
+    log_info() { echo "$*"; }
+    log_success() { echo "$*"; }
+    log_warn() { echo "$*"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    unset LSO_FS_ROOT
+    LSO_SKIP_RESTART=0
+    DRY_RUN=false
+    _lso_lsphp_pids() { printf '%s\n' 4242 4343; }
+    kill() { echo "KILLED $*"; }
+    lso_recycle_lsphp
+)
+if echo "$recycle_out" | grep -q "KILLED -9 4242" && echo "$recycle_out" | grep -q "KILLED -9 4343"; then
+    log_pass "lso_recycle_lsphp: signals every lsphp PID (-9)"
+else
+    log_fail "lso_recycle_lsphp: did not signal expected PIDs: $recycle_out"
+fi
+if echo "$recycle_out" | grep -q "Recycled 2 lsphp worker"; then
+    log_pass "lso_recycle_lsphp: reports recycled count"
+else
+    log_fail "lso_recycle_lsphp: recycled-count message wrong: $recycle_out"
+fi
+
 # Idempotency: second apply on the 4g tree must produce identical config
 IDEM_DATA="${TEST_TMP}/idem-data"
 mkdir -p "$IDEM_DATA"

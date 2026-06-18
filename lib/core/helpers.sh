@@ -114,6 +114,44 @@ lso_php_ext_loaded() {
     return 1
 }
 
+# List PIDs of running lsphp worker processes (one per line).
+# Test/override seam: redefine this function to feed deterministic PIDs without
+# touching real processes. Matches on `comm` (the worker cmdline is just `lsphp`,
+# NOT the full /lsphpNN/bin/lsphp path — so `pkill -f .../lsphp` would miss it).
+_lso_lsphp_pids() {
+    ps -eo pid,comm 2>/dev/null | awk '$2 ~ /(^|\/)lsphp$/ { print $1 }'
+}
+
+# Force-recycle lsphp worker processes so a freshly-written php.ini/OPcache
+# drop-in takes effect in the WEB SAPI immediately. A graceful LiteSpeed restart
+# (SIGUSR1) does NOT recycle existing lsphp children — they keep serving the OLD
+# config until they cycle on their own. We kill them by PID; LSWS respawns on
+# demand, loading the new config. (Confirmed live on lsdemo 2026-06-17.)
+# Honors DRY_RUN and LSO_SKIP_RESTART/LSO_FS_ROOT (fixture/test mode).
+lso_recycle_lsphp() {
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] Would recycle lsphp worker(s) to load new php.ini/OPcache config"
+        return 0
+    fi
+    if [ "${LSO_SKIP_RESTART:-0}" = "1" ] || [ -n "${LSO_FS_ROOT:-}" ]; then
+        log_info "lsphp recycle skipped (fixture/test mode)"
+        return 0
+    fi
+
+    local pids pid count=0
+    pids=$(_lso_lsphp_pids)
+    if [ -z "$pids" ]; then
+        log_info "No lsphp workers running to recycle"
+        return 0
+    fi
+
+    for pid in $pids; do
+        kill -9 "$pid" 2>/dev/null || true
+        count=$((count + 1))
+    done
+    log_success "Recycled ${count} lsphp worker(s) — new php.ini/OPcache config now live in web SAPI"
+}
+
 ################################################################################
 # Checksums / Timestamps (cross-platform)
 ################################################################################

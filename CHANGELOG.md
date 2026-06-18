@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.3] - 2026-06-18 (lsphp recycle after php.ini/OPcache changes — lsdemo #112)
+
+### Fixed
+- **lsphp workers are now force-recycled after an OPcache/php.ini change.** Confirmed live on lsdemo: a graceful LiteSpeed restart (`lswsctrl restart` → SIGUSR1) does **NOT** recycle existing `lsphp` child processes — they keep serving the OLD php.ini/OPcache config (e.g. the default 128MB pool) for hundreds of seconds, so the just-deployed drop-in was a silent no-op in the **web SAPI**. The OPcache feature now calls a new `lso_recycle_lsphp` helper that kills the workers by PID (LSWS respawns them on demand, loading the new drop-in). Honors `DRY_RUN` (`[DRY RUN] Would recycle lsphp …`) and `LSO_SKIP_RESTART`/`LSO_FS_ROOT` (fixture/test mode). Gotcha baked in: workers are matched on `comm` (cmdline is just `lsphp`), **not** `pkill -f /lsphpNN/bin/lsphp`, which silently matches nothing.
+
+### Tests
+- +5 (252 total): dry-run prints the would-recycle line; a fixture run skips the recycle (never signals a real process); and a unit test of `lso_recycle_lsphp` (PID seam + shadowed `kill`) asserts every worker PID is signalled and the count is reported.
+
 ## [0.7.2] - 2026-06-17 (live E2E fixes — lsdemo)
 
 Two bugs found running the probes against the real OpenLiteSpeed + WordPress stack on lsdemo (both probes otherwise worked first try and found genuine issues: no redis ext in the lsphp83 web SAPI, and an actually-undersized OPcache — pool 0% free, hit-rate 60% on a 3847-script cache).
