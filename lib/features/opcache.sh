@@ -109,15 +109,12 @@ feature_apply_custom_opcache() {
         "INTERNED_MB=$(_opcache_interned "$tier")" \
         "MAX_FILES=$(_opcache_max_files "$tier")" || return 1
 
-    # Detached-PHP restart trigger (lsphp keeps running across lswsctrl restart)
-    if [ -n "${LSO_PHP_RESTART:-}" ]; then
-        if [ "${DRY_RUN:-false}" = true ]; then
-            log_info "[DRY RUN] Would run: ${LSO_PHP_RESTART}"
-        elif [ -d "${LSO_LSWS_ROOT:-/nonexistent}/admin/tmp" ]; then
-            eval "$LSO_PHP_RESTART" || log_warn "PHP restart trigger failed (non-fatal)"
-            log_info "Triggered lsphp restart"
-        fi
-    fi
+    # Force-recycle lsphp so the new drop-in is live in the web SAPI immediately.
+    # A graceful lswsctrl restart leaves existing lsphp children on the OLD config;
+    # lso_recycle_lsphp kills them by PID (LSWS respawns on demand). The drop-in is
+    # already on disk (template_deploy above), so respawned workers load it.
+    # Honors DRY_RUN and fixture/test mode internally.
+    lso_recycle_lsphp
 }
 
 feature_detect_custom_opcache() {
