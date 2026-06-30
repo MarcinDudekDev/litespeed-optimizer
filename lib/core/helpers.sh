@@ -264,11 +264,20 @@ get_dir_mtime() {
 TRANSACTION_FILES=()
 TRANSACTION_TEMPS=()
 TRANSACTION_ACTIVE=false
+# Count of staged confedit WRITES this transaction (incremented per ols_set/
+# ols_set_env routed to staging). Unlike the file count it rises on EVERY staged
+# write, even repeated edits to the same already-staged file — so callers can tell
+# whether a given feature actually wrote config (the file count can't, due to
+# same-file dedup).
+# shellcheck disable=SC2034  # mutated in confedit.sh (_confedit_route), read in optimizer.sh
+TRANSACTION_WRITES=0
 
 # Start transaction: prepare to modify multiple files atomically
 transaction_start() {
     TRANSACTION_FILES=()
     TRANSACTION_TEMPS=()
+    # shellcheck disable=SC2034  # read cross-file in confedit.sh/optimizer.sh
+    TRANSACTION_WRITES=0
     TRANSACTION_ACTIVE=true
 }
 

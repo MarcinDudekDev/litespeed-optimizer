@@ -95,6 +95,9 @@ _confedit_route() {
         transaction_stage "$file" || return 1
         _CE_SRC="$TXN_TEMP_FILE"
         _CE_DEST="$TXN_TEMP_FILE"
+        # Count every staged write (rises even when the file was already staged),
+        # so the optimize loop can attribute a config write to the running feature.
+        TRANSACTION_WRITES=$(( ${TRANSACTION_WRITES:-0} + 1 ))
     else
         _CE_SRC="$file"
         _CE_DEST="$file"
@@ -179,6 +182,10 @@ ols_set() {
 
 # ols_ensure_include <file> <include-path>
 # Ensure `include <include-path>` exists at top level of <file>; append if not.
+# NOTE: NOT transaction-aware — writes the live file immediately and is not
+# covered by the optimize transaction. No feature calls it during optimize today
+# (tests only). If a future feature needs it mid-optimize, route it through
+# _confedit_route / _confedit_read_src like ols_set first.
 ols_ensure_include() {
     local file="$1" include_path="$2"
     [ -f "$file" ] || return 1
@@ -395,7 +402,10 @@ lso_conf_set() {
         log_info "[DRY RUN] Would set ${block}.${key} = ${value} in ${file}"
         return 0
     fi
-    ols_set "$file" "$block" "$key" "$value"
+    # Propagate a write failure so the feature returns non-zero (the transaction
+    # then rolls back cleanly) instead of relying solely on set -e killing the
+    # shell into the EXIT-trap rollback.
+    ols_set "$file" "$block" "$key" "$value" || return 1
     log_info "Set ${block}.${key} = ${value}"
 }
 
@@ -406,6 +416,6 @@ lso_conf_set_env() {
         log_info "[DRY RUN] Would set ${block} env ${var}=${value} in ${file}"
         return 0
     fi
-    ols_set_env "$file" "$block" "$var" "$value"
+    ols_set_env "$file" "$block" "$var" "$value" || return 1
     log_info "Set ${block} env ${var}=${value}"
 }

@@ -99,14 +99,19 @@ apply_optimizations() {
     local applied=0 failed=0 skipped=0
     local fid
 
-    # Atomic config edits: stage every confedit (ols_set/ols_set_env) write to a
-    # per-file temp and commit them all at once only if EVERY feature succeeds.
-    # A mid-run feature failure rolls the staged config edits back, so a broken
+    # Atomic SERVER-CONFIG edits: every confedit (ols_set/ols_set_env) write is
+    # staged to a per-file temp and committed together at the end, so a broken
     # half-applied server config can never reach disk (the EXIT trap also rolls
-    # back on an abort/crash). NOTE: this covers the main server config only —
-    # wp-cli (LSCWP/Woo) and per-site .htaccess writes are not transactional, so
-    # side effects from features that already ran are not undone. Skipped under
-    # DRY_RUN (no real writes) and when the engine isn't loaded (subset tests).
+    # back on an abort/crash).
+    #
+    # Rollback is scoped to CONFIG failures, not every feature failure: if a
+    # feature stages main-config edits and then fails mid-write, its partial edit
+    # is unsafe -> roll back the whole transaction and abort. But a feature that
+    # writes NO main config (LSCWP/Woo via wp-cli, opcache .ini, per-site
+    # .htaccess) failing must NOT discard the already-valid server config staged
+    # by earlier features (those side effects are non-transactional and aren't
+    # undone anyway) — its failure is recorded and the run continues; the staged
+    # config still commits. Skipped under DRY_RUN and when the engine isn't loaded.
     local _txn_active=false
     if [ "${DRY_RUN:-false}" != true ] && type -t transaction_start >/dev/null 2>&1; then
         transaction_start
@@ -144,16 +149,25 @@ apply_optimizations() {
         [ -z "$display" ] && display="$fid"
         log_info "Applying: $display"
 
+        # Snapshot the staged-WRITE count before this feature so that, on failure,
+        # we can tell whether it actually wrote server config. (A file-count delta
+        # can't tell — every server-config feature edits the same httpd_config and
+        # dedups onto one staged temp; the write counter still rises per edit.)
+        local _writes_before=0
+        [ "$_txn_active" = true ] && _writes_before=${TRANSACTION_WRITES:-0}
+
         if feature_apply "$fid" "$target_site"; then
             applied=$((applied + 1))
             log_success "$display done"
         else
             failed=$((failed + 1))
             log_error "$display FAILED"
-            # Atomic optimize: abort the run and discard ALL staged config edits
-            # so the live server config is left exactly as it was found.
-            if [ "$_txn_active" = true ]; then
-                log_error "Rolling back staged config edits (atomic optimize) — server config left unchanged."
+            # Only a feature that wrote main-config edits before failing leaves an
+            # unsafe partial config -> roll back the whole transaction + abort.
+            # A non-config failure (wrote no config) keeps the earlier features'
+            # valid staged config, which still commits below.
+            if [ "$_txn_active" = true ] && [ "${TRANSACTION_WRITES:-0}" -gt "$_writes_before" ]; then
+                log_error "Rolling back staged server config ($display failed mid-write) — config left unchanged."
                 transaction_rollback
                 _txn_active=false
                 break
@@ -161,14 +175,11 @@ apply_optimizations() {
         fi
     done
 
-    # Commit the staged config edits onto the live files — but ONLY when every
-    # feature succeeded. (On failure we already rolled back and broke above.)
+    # Commit the staged server-config edits: control reaches here only when no
+    # config-writing feature failed mid-write (those abort + roll back above), so
+    # every staged edit is from a feature that completed its config writes.
     if [ "$_txn_active" = true ]; then
-        if [ "$failed" -eq 0 ]; then
-            transaction_commit
-        else
-            transaction_rollback
-        fi
+        transaction_commit
         _txn_active=false
     fi
 
