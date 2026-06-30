@@ -359,7 +359,7 @@ EOF
 
 show_version() {
     if [ "$JSON_OUTPUT" = true ]; then
-        json_output "{\"version\": \"${VERSION}\"}"
+        json_output "$(printf '{"version":"%s"}' "$(json_escape "${VERSION}")")"
     else
         echo "litespeed-optimizer version ${VERSION}"
     fi
@@ -630,7 +630,7 @@ cmd_status() {
                     applied="true"
                 fi
                 local entry
-                entry=$(printf '{"id":"%s","applied":%s}' "$fid" "$applied")
+                entry=$(printf '{"id":"%s","applied":%s}' "$(json_escape "$fid")" "$applied")
                 if [ -n "$features_json" ]; then
                     features_json="${features_json},${entry}"
                 else
@@ -639,7 +639,7 @@ cmd_status() {
             done < <(feature_list)
         fi
         json_output "$(printf '{"command":"status","version":"%s","edition":"%s","panel":"%s","features":[%s]}' \
-            "$VERSION" "${LSO_EDITION:-none}" "${LSO_PANEL:-none}" "$features_json")"
+            "$(json_escape "$VERSION")" "$(json_escape "${LSO_EDITION:-none}")" "$(json_escape "${LSO_PANEL:-none}")" "$features_json")"
         return 0
     fi
 

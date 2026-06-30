@@ -110,7 +110,7 @@ run_benchmark() {
     prev=$(ls -1t "$bench_dir"/*.json 2>/dev/null | head -1 || true)
     out="${bench_dir}/$(date +%Y%m%d-%H%M%S).json"
     printf '{"url":"%s","first_ttfb_ms":%s,"median_ttfb_ms":%s,"http_code":"%s","cache_header":"%s","runs":%s}\n' \
-        "$url" "$first_ttfb" "$median_ttfb" "$code" "$cache_header" "$BENCH_RUNS" > "$out"
+        "$(json_escape "$url")" "$first_ttfb" "$median_ttfb" "$(json_escape "$code")" "$(json_escape "$cache_header")" "$BENCH_RUNS" > "$out"
     log_info "Saved: $out"
 
     if [ -n "$prev" ] && grep -q "\"url\":\"$url\"" "$prev" 2>/dev/null; then

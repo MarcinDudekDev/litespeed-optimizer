@@ -63,7 +63,7 @@ _az_check() {
         # to consumers that sum weights without inspecting status.
         [ "$status" = warn ] && jweight=0
         entry=$(printf '{"category":"%s","check":"%s","status":"%s","weight":%s,"fix":"%s"}' \
-            "$category" "$name" "$status" "$jweight" "$fix")
+            "$category" "$(json_escape "$name")" "$status" "$jweight" "$(json_escape "$fix")")
         if [ -n "$_AZ_JSON_ITEMS" ]; then
             _AZ_JSON_ITEMS="${_AZ_JSON_ITEMS},${entry}"
         else
@@ -480,7 +480,7 @@ run_analyze() {
 
     if [ "${JSON_OUTPUT:-false}" = true ]; then
         json_output "$(printf '{"command":"analyze","version":"%s","edition":"%s","panel":"%s","tier":"%s","score":%s,"grade":"%s","danger_findings":%s,"checks":[%s]}' \
-            "${VERSION:-?}" "$LSO_EDITION" "$LSO_PANEL" "$tier" "$score" "$grade" "$_AZ_DANGER" "$_AZ_JSON_ITEMS")"
+            "$(json_escape "${VERSION:-?}")" "$(json_escape "$LSO_EDITION")" "$(json_escape "$LSO_PANEL")" "$(json_escape "$tier")" "$score" "$grade" "$_AZ_DANGER" "$_AZ_JSON_ITEMS")"
     else
         echo ""
         echo "==========================================================="

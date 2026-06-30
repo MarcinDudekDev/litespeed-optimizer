@@ -230,7 +230,7 @@ run_probe_redis() {
 
     if [ "${JSON_OUTPUT:-false}" = true ]; then
         json_output "$(printf '{"command":"probe-redis","sapi":"%s","php_version":"%s","redis_ext":%s,"redis_ext_version":"%s","redis_server":"%s"}' \
-            "$sapi" "$phpver" "$has_ext" "$redis_ext" "$redis_server")"
+            "$(json_escape "$sapi")" "$(json_escape "$phpver")" "$has_ext" "$(json_escape "$redis_ext")" "$(json_escape "$redis_server")")"
         [ "$has_ext" = true ] && return 0
         return 1
     fi
@@ -300,7 +300,7 @@ run_probe_opcache() {
 
     if [ -z "$oc_block" ] || [ "${oc_block#null}" != "$oc_block" ] || [ "$enabled" = "false" ]; then
         if [ "${JSON_OUTPUT:-false}" = true ]; then
-            json_output "$(printf '{"command":"probe-opcache","sapi":"%s","php_version":"%s","opcache_enabled":false}' "$sapi" "$phpver")"
+            json_output "$(printf '{"command":"probe-opcache","sapi":"%s","php_version":"%s","opcache_enabled":false}' "$(json_escape "$sapi")" "$(json_escape "$phpver")")"
         else
             log_info  "Web SAPI: ${sapi:-?}   PHP: ${phpver:-?}"
             log_error "OPcache is NOT enabled in the web SAPI — every request recompiles PHP from source"
@@ -402,7 +402,7 @@ run_probe_opcache() {
 
     if [ "${JSON_OUTPUT:-false}" = true ]; then
         json_output "$(printf '{"command":"probe-opcache","sapi":"%s","php_version":"%s","opcache_enabled":true,"verdict":"%s","pool_mb":%s,"free_pct":%s,"wasted_pct":%s,"hit_rate":%s,"num_cached_keys":%s,"max_cached_keys":%s,"num_cached_scripts":%s,"oom_restarts":%s,"fragmented":%s,"self_fixable":%s}' \
-            "$sapi" "$phpver" "$([ "$full" = true ] && echo undersized || echo healthy)" \
+            "$(json_escape "$sapi")" "$(json_escape "$phpver")" "$([ "$full" = true ] && echo undersized || echo healthy)" \
             "${pool_mb:-0}" "${free_pct:-0}" "${wasted_pct:-0}" "${hit_rate:-0}" "${keys:-0}" "${max_keys:-0}" "${scripts:-0}" "${oom:-0}" "$fragmented" "$self_fixable")"
         [ "$full" = true ] && return 1
         return 0

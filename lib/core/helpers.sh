@@ -302,3 +302,21 @@ transaction_rollback() {
     TRANSACTION_TEMPS=()
     TRANSACTION_ACTIVE=false
 }
+
+################################################################################
+# JSON
+################################################################################
+
+# Escape a string for safe inclusion inside a JSON double-quoted value.
+# Handles backslash, double-quote, and the common control chars (tab/CR/LF).
+# Pure bash 3.2 parameter expansion; prints the escaped string (no quotes).
+# Args: $1 = raw string
+json_escape() {
+    local s=$1
+    s=${s//\\/\\\\}     # backslash first, so later additions aren't doubled
+    s=${s//\"/\\\"}     # double quote
+    s=${s//$'\t'/\\t}   # tab
+    s=${s//$'\r'/\\r}   # carriage return
+    s=${s//$'\n'/\\n}   # newline
+    printf '%s' "$s"
+}

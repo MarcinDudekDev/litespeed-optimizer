@@ -421,7 +421,7 @@ run_remote_analyze() {
 
     if [ "${JSON_OUTPUT:-false}" = true ]; then
         json_output "$(printf '{"command":"analyze-remote","version":"%s","url":"%s","requests_used":%s,"woocommerce":%s,"score":%s,"grade":"%s","danger_findings":%s,"checks":[%s]}' \
-            "${VERSION:-?}" "$url" "$_RM_REQ_COUNT" "$is_woo" "$score" "$grade" "$_AZ_DANGER" "$_AZ_JSON_ITEMS")"
+            "$(json_escape "${VERSION:-?}")" "$(json_escape "$url")" "$_RM_REQ_COUNT" "$is_woo" "$score" "$grade" "$_AZ_DANGER" "$_AZ_JSON_ITEMS")"
     else
         echo ""
         echo "==========================================================="
