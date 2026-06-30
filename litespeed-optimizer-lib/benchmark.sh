@@ -143,7 +143,11 @@ _load_num() {
     if [ "$_kind" = int ]; then
         case "$_v" in ''|*[!0-9]*) _v=0 ;; esac
     else
+        # Reject empty, non-numeric, and multi-dot; then reject the JSON-invalid
+        # leading/trailing-dot forms (".5", "5.", lone ".") and digit-less values.
         case "$_v" in ''|*[!0-9.]*|*.*.*) _v=0 ;; esac
+        case "$_v" in .*|*.) _v=0 ;; esac
+        case "$_v" in *[0-9]*) ;; *) _v=0 ;; esac
     fi
     eval "$_n=\$_v"
 }
@@ -229,7 +233,12 @@ run_load() {
     log_warn "Offline caveat: real saturation thresholds need a live box under load — this measures the harness, not production capacity."
 
     local auth_args reqs="0" errors="0" sum_ms="0" rps="0" mean_ms="0"
-    auth_args=$(_lso_auth_args)
+    auth_args=$(_lso_auth_args 2>/dev/null || true)
+    # Explicit LSO_LOAD_TOOL=wrk/k6 bypasses the auto auth->curl fallback; warn so
+    # a basic-auth load against a gated site isn't silently unauthenticated.
+    if [ -n "$auth_args" ] && { [ "$tool" = "wrk" ] || [ "$tool" = "k6" ]; }; then
+        log_warn "HTTP auth is set but LSO_LOAD_TOOL=${tool} does not send it — results will be unauthenticated (use the curl tool for auth'd load)."
+    fi
 
     if [ "$tool" = "wrk" ]; then
         local wrk_out
