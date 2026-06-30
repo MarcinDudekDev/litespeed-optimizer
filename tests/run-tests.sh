@@ -681,6 +681,42 @@ else
 fi
 
 ################################################################################
+# SECTION 9b: json_escape helper
+################################################################################
+log_section "JSON Escaping Tests"
+
+je=$(
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    json_escape 'a"b\c'
+)
+if [ "$je" = 'a\"b\\c' ]; then
+    log_pass "json_escape: quote + backslash escaped"
+else
+    log_fail "json_escape quote/backslash wrong: [$je]"
+fi
+
+# A docroot containing a quote/backslash must still yield parseable JSON in
+# `detect --json`. The .htaccess loop + path fields are the realistic vectors.
+if command -v python3 &>/dev/null; then
+    JE_FIX="${TEST_TMP}/jsonesc"
+    mkdir -p "${JE_FIX}/var/www/wei\"rd\\site"
+    je_json=$(
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/core/helpers.sh"
+        printf '{"path":"%s"}\n' "$(json_escape 'a"b\c
+d')"
+    )
+    if echo "$je_json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+        log_pass "json_escape: control/quote string parses as valid JSON"
+    else
+        log_fail "json_escape: produced invalid JSON: $je_json"
+    fi
+else
+    log_skip "python3 unavailable — json_escape validity test skipped"
+fi
+
+################################################################################
 # SECTION 10: confedit env primitives ("env VAR=value" lines, "name arg" blocks)
 ################################################################################
 log_section "confedit env Primitives"
@@ -1469,6 +1505,13 @@ if echo "$az_json" | grep -q '"score":' && echo "$az_json" | grep -q '"checks":'
     log_pass "analyze --json outputs score + checks array"
 else
     log_fail "analyze --json malformed"
+fi
+if command -v python3 &>/dev/null; then
+    if echo "$az_json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+        log_pass "analyze --json is parseable JSON (escaping intact)"
+    else
+        log_fail "analyze --json is not valid JSON"
+    fi
 fi
 
 # Web-SAPI redis-extension CLI heuristic (hybrid half): when redis-server is

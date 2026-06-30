@@ -330,16 +330,18 @@ detect_report_json() {
     if [ ${#LSO_WP_SITES[@]} -gt 0 ]; then
         local site
         for site in "${LSO_WP_SITES[@]}"; do
+            local esite
+            esite=$(json_escape "$site")
             if [ -n "$sites_json" ]; then
-                sites_json="${sites_json},\"${site}\""
+                sites_json="${sites_json},\"${esite}\""
             else
-                sites_json="\"${site}\""
+                sites_json="\"${esite}\""
             fi
         done
     fi
 
     json_output "$(printf '{"command":"detect","version":"%s","edition":"%s","panel":"%s","lsws_root":"%s","main_conf":"%s","restart_cmd":"%s","php_bin":"%s","php_ver":"%s","ram_tier":"%s","firewall":"%s","has_redis":%s,"has_mariadb":%s,"has_wpcli":%s,"wp_sites":[%s]}' \
-        "${VERSION:-0.1.0}" "$LSO_EDITION" "$LSO_PANEL" "$LSO_LSWS_ROOT" "$LSO_MAIN_CONF" \
-        "$LSO_RESTART_CMD" "$LSO_PHP_BIN" "$LSO_PHP_VER" "$LSO_RAM_TIER" "$LSO_FIREWALL" \
+        "$(json_escape "${VERSION:-0.1.0}")" "$(json_escape "$LSO_EDITION")" "$(json_escape "$LSO_PANEL")" "$(json_escape "$LSO_LSWS_ROOT")" "$(json_escape "$LSO_MAIN_CONF")" \
+        "$(json_escape "$LSO_RESTART_CMD")" "$(json_escape "$LSO_PHP_BIN")" "$(json_escape "$LSO_PHP_VER")" "$(json_escape "$LSO_RAM_TIER")" "$(json_escape "$LSO_FIREWALL")" \
         "$LSO_HAS_REDIS" "$LSO_HAS_MARIADB" "$LSO_HAS_WPCLI" "$sites_json")"
 }
