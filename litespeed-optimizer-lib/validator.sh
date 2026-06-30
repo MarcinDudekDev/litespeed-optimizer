@@ -20,6 +20,12 @@
 # Baseline HTTP status captured before changes
 LSO_BASELINE_STATUS=""
 LSO_BASELINE_URL="http://127.0.0.1/"
+# Optional real-vhost baseline (set by snapshot_baseline when a site URL is
+# known) — catches a broken real vhost that the default 127.0.0.1 vhost hides.
+LSO_BASELINE_VHOST_URL=""
+LSO_BASELINE_VHOST_STATUS=""
+# Why the last restart attempt failed (for accurate rollback messaging)
+LSO_RESTART_FAIL_REASON=""
 
 ################################################################################
 # Health Checks
@@ -38,7 +44,6 @@ snapshot_baseline() {
     LSO_BASELINE_STATUS=$(http_status "$LSO_BASELINE_URL")
     log_info "Baseline: ${LSO_BASELINE_URL} -> HTTP ${LSO_BASELINE_STATUS}"
     if [ -n "$vhost_url" ]; then
-        # shellcheck disable=SC2034  # Consumed by vhost health check (Phase 2+)
         LSO_BASELINE_VHOST_URL="$vhost_url"
         LSO_BASELINE_VHOST_STATUS=$(http_status "$vhost_url")
         log_info "Baseline: ${vhost_url} -> HTTP ${LSO_BASELINE_VHOST_STATUS}"
@@ -62,24 +67,36 @@ server_process_running() {
     return 0
 }
 
-# health_check — process up AND baseline URL same-or-better, 3 retries x 5s
+# _health_url_ok <url> <baseline_status> — same-or-better check for one URL.
+# A URL whose baseline was unusable (empty / 000) contributes no HTTP signal
+# (the process check is then the only guarantee); a URL with a real baseline
+# must now answer non-000 and non-5xx.
+_health_url_ok() {
+    local url="$1" baseline="$2" status
+    if [ -z "$baseline" ] || [ "$baseline" = "000" ]; then
+        return 0
+    fi
+    status=$(http_status "$url")
+    if [ "$status" != "000" ] && [ "${status:0:1}" != "5" ]; then
+        log_success "Health: ${url} -> HTTP ${status} (baseline ${baseline})"
+        return 0
+    fi
+    log_warn "Health: ${url} -> HTTP ${status} (baseline ${baseline})"
+    return 1
+}
+
+# health_check — process up AND every baselined URL same-or-better. The real
+# vhost (when known) is checked too, so a broken vhost the default 127.0.0.1
+# vhost would mask still fails the gate. 3 retries x 5s.
 health_check() {
     local attempt
     for attempt in 1 2 3; do
         if server_process_running; then
-            local status
-            status=$(http_status "$LSO_BASELINE_URL")
-            # Same-or-better: any response when baseline existed; if baseline
-            # was a real status (<500), require non-5xx and non-000 now.
-            if [ -z "$LSO_BASELINE_STATUS" ] || [ "$LSO_BASELINE_STATUS" = "000" ]; then
-                log_success "Health check passed (process running; no HTTP baseline)"
+            if _health_url_ok "$LSO_BASELINE_URL" "$LSO_BASELINE_STATUS" &&
+               _health_url_ok "$LSO_BASELINE_VHOST_URL" "$LSO_BASELINE_VHOST_STATUS"; then
+                log_success "Health check passed (process running; baselined URLs same-or-better)"
                 return 0
             fi
-            if [ "$status" != "000" ] && [ "${status:0:1}" != "5" ]; then
-                log_success "Health check passed (HTTP ${status}, baseline ${LSO_BASELINE_STATUS})"
-                return 0
-            fi
-            log_warn "Health attempt ${attempt}/3: HTTP ${status} (baseline ${LSO_BASELINE_STATUS})"
         else
             log_warn "Health attempt ${attempt}/3: server process not running"
         fi
@@ -103,19 +120,43 @@ verified_restart() {
     fi
 
     if [ -z "${LSO_RESTART_CMD:-}" ]; then
-        log_warn "No restart command available — cannot verify server health"
-        return 0
-    fi
-
-    log_info "Restarting LiteSpeed: ${LSO_RESTART_CMD}"
-    if ! eval "$LSO_RESTART_CMD" >> "${LOG_FILE}" 2>&1; then
-        log_error "Restart command failed"
+        # Fail closed: we applied changes but cannot restart to activate/verify
+        # them, so we must not report success. Caller rolls back. Set
+        # LSO_SKIP_RESTART=1 to intentionally skip (handled above).
+        LSO_RESTART_FAIL_REASON="no restart command available"
+        log_error "No restart command available — cannot activate/verify changes"
         return 1
     fi
 
+    # Run the restart command WITHOUT eval. Unquoted expansion word-splits
+    # "cmd arg arg" into argv but treats any injected ; | & \$() \` as literal
+    # arguments (which simply fail), closing the root-RCE vector eval opened.
+    case "$LSO_RESTART_CMD" in
+        *';'*|*'|'*|*'&'*|*'$('*|*'`'*|*'>'*|*'<'*)
+            LSO_RESTART_FAIL_REASON="restart command rejected (shell metacharacters)"
+            log_error "Refusing restart command with shell metacharacters: ${LSO_RESTART_CMD}"
+            return 1 ;;
+    esac
+    log_info "Restarting LiteSpeed: ${LSO_RESTART_CMD}"
+    # noglob so an unquoted * / ? / [ in the command can never pathname-expand;
+    # combined with the metachar guard the word-split is purely "cmd arg arg".
+    set -f
+    # shellcheck disable=SC2086  # intentional word-split of a validated command
+    if ! $LSO_RESTART_CMD >> "${LOG_FILE}" 2>&1; then
+        set +f
+        LSO_RESTART_FAIL_REASON="restart command failed"
+        log_error "Restart command failed"
+        return 1
+    fi
+    set +f
+
     # Give the server a moment before first probe
     sleep 2
-    health_check
+    if health_check; then
+        return 0
+    fi
+    LSO_RESTART_FAIL_REASON="health check did not pass after restart"
+    return 1
 }
 
 # verified_restart_or_rollback
@@ -125,6 +166,8 @@ verified_restart_or_rollback() {
         log_info "[DRY RUN] Would restart LiteSpeed and verify health"
         return 0
     fi
+
+    LSO_RESTART_FAIL_REASON=""
 
     # Pre-check: lint the OLS main config before risking a restart
     if [ "${LSO_EDITION:-}" = "ols" ] && [ -n "${LSO_MAIN_CONF:-}" ] && type -t ols_lint &>/dev/null; then
@@ -138,7 +181,9 @@ verified_restart_or_rollback() {
         return 0
     fi
 
-    log_error "Health check FAILED after restart — restoring backup"
+    # Report the ACTUAL reason — the restart may never have run (empty command
+    # or metacharacter refusal), so "health check failed" would mislead.
+    log_error "Restart/health check failed (${LSO_RESTART_FAIL_REASON:-unknown}) — restoring backup"
     _auto_restore_and_die
 }
 

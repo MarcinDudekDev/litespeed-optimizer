@@ -585,6 +585,54 @@ else
     log_fail "verify_restored_files reports mismatches"
 fi
 
+# 5. LSCWP option rollback: restore_backup_files must `litespeed-option import`
+#    the pre-change export back into its recorded docroot (was never done).
+LSCWP_RB_DR="${TEST_TMP}/lscwp-rb-docroot"; mkdir -p "$LSCWP_RB_DR"
+: > "${LSCWP_RB_DR}/wp-config.php"   # restore requires a real WP docroot
+LSCWP_RB_BK="${TEST_TMP}/lscwp-rb-backup"; mkdir -p "${LSCWP_RB_BK}/lscwp"
+printf '{"opt":"old"}\n' > "${LSCWP_RB_BK}/lscwp/site.json"
+printf '%s\n' "$LSCWP_RB_DR" > "${LSCWP_RB_BK}/lscwp/site.docroot"
+LSCWP_RB_LOG="${TEST_TMP}/lscwp-rb.log"; : > "$LSCWP_RB_LOG"
+(
+    set -euo pipefail
+    LOG_FILE="${TEST_TMP}/lscwp-rb-run.log"; : > "$LOG_FILE"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    lso_wp() { echo "$*" >> "$LSCWP_RB_LOG"; }   # mock: log the import call
+    restore_backup_files "$LSCWP_RB_BK"
+) >/dev/null 2>&1 || true
+if grep -q "litespeed-option import" "$LSCWP_RB_LOG" && grep -q "site.json" "$LSCWP_RB_LOG" \
+    && grep -q "$LSCWP_RB_DR" "$LSCWP_RB_LOG"; then
+    log_pass "rollback restores LSCWP options (litespeed-option import into recorded docroot)"
+else
+    log_fail "rollback did not import LSCWP options: $(tr -d '\n' < "$LSCWP_RB_LOG")"
+fi
+
+# 6. Traversal guard: a tampered .docroot with .. must be refused (no import)
+LSCWP_TR_BK="${TEST_TMP}/lscwp-tr-backup"; mkdir -p "${LSCWP_TR_BK}/lscwp"
+printf '{"opt":"x"}\n' > "${LSCWP_TR_BK}/lscwp/evil.json"
+printf '%s\n' "../../etc" > "${LSCWP_TR_BK}/lscwp/evil.docroot"
+LSCWP_TR_LOG="${TEST_TMP}/lscwp-tr.log"; : > "$LSCWP_TR_LOG"
+(
+    set -euo pipefail
+    LOG_FILE="${TEST_TMP}/lscwp-tr-run.log"; : > "$LOG_FILE"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    lso_wp() { echo "$*" >> "$LSCWP_TR_LOG"; }
+    restore_backup_files "$LSCWP_TR_BK"
+) >/dev/null 2>&1 || true
+if [ ! -s "$LSCWP_TR_LOG" ]; then
+    log_pass "rollback refuses traversal docroot (.. in sidecar -> no import)"
+else
+    log_fail "rollback imported into unsafe docroot: $(tr -d '\n' < "$LSCWP_TR_LOG")"
+fi
+
 ################################################################################
 # SECTION 9: Transaction Primitives
 ################################################################################
@@ -1295,6 +1343,26 @@ for kv in "dynReqPerSec 2" "staticReqPerSec 40" "softLimit 15" "hardLimit 20" "g
     fi
 done
 [ "$sec_ok" = true ] && log_pass "security: full perClientConnLimit throttling block applied"
+
+# Security headers deployed to the WP site .htaccess (makes `headers` alias real)
+SEC_HT="$SEC_FIX/home/example.com/public_html/.htaccess"
+if grep -q "# BEGIN litespeed-optimizer headers" "$SEC_HT" 2>/dev/null \
+    && grep -q 'X-Content-Type-Options "nosniff"' "$SEC_HT" 2>/dev/null \
+    && grep -q 'X-Frame-Options "SAMEORIGIN"' "$SEC_HT" 2>/dev/null \
+    && grep -q 'Referrer-Policy' "$SEC_HT" 2>/dev/null; then
+    log_pass "security: response headers deployed to site .htaccess (headers alias is truthful)"
+else
+    log_fail "security: headers block missing from .htaccess"
+fi
+# Idempotent: a second apply must not duplicate the block
+sec_out2=$(LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --force 2>&1 || true)
+if [ "$(grep -c "# BEGIN litespeed-optimizer headers" "$SEC_HT" 2>/dev/null)" = "1" ]; then
+    log_pass "security: headers block is idempotent (no duplication on re-apply)"
+else
+    log_fail "security: headers block duplicated on re-apply"
+fi
 if echo "$sec_out" | grep -qi "recaptcha"; then
     log_pass "security: reCAPTCHA report-only guidance printed"
 else
@@ -1546,6 +1614,10 @@ class H(http.server.BaseHTTPRequestHandler):
             hdrs["x-litespeed-cache-control"] = "no-cache"
             hdrs["Set-Cookie"] = "cart=1; path=/"
         elif "/cart/" in path or "/checkout/" in path or "wc-ajax" in path:
+            if "/cart/" in path:
+                body = b'<html><body><div class="wp-block-woocommerce-cart">cart</div></body></html>'
+            elif "/checkout/" in path:
+                body = b'<html><body><div class="wp-block-woocommerce-checkout">checkout</div></body></html>'
             if MODE == "bad":
                 hdrs["x-litespeed-cache"] = "hit"
             else:
@@ -1602,6 +1674,23 @@ PYEOF
         log_pass "remote: isolation probe works (A has item, B clean)"
     else
         log_fail "remote: isolation probe failed: $(echo "$rm_out" | grep -i isolation | head -1)"
+    fi
+    # Block-vs-shortcode guard: block-rendered cart AND checkout each warn
+    if echo "$rm_out" | grep -q "cart page.*uses WooCommerce blocks"; then
+        log_pass "remote: block-cart guard warns (block-disabling breaks empty-cart fallback)"
+    else
+        log_fail "remote: block-cart guard missing: $(echo "$rm_out" | grep -i block | head -1)"
+    fi
+    if echo "$rm_out" | grep -q "checkout page.*uses WooCommerce blocks"; then
+        log_pass "remote: block-checkout guard warns"
+    else
+        log_fail "remote: block-checkout guard missing"
+    fi
+    # warn is advisory only — it must NOT drag the good site below the 85 gate
+    if [ -n "$rm_score" ] && [ "$rm_score" -ge 85 ]; then
+        log_pass "remote: block warn is non-scoring (good site still >= 85)"
+    else
+        log_fail "remote: block warn wrongly penalized score (${rm_score:-none})"
     fi
 
     # Bad site: cart cached + vary-poisoning signature must produce DANGER + cap
@@ -2334,6 +2423,124 @@ PYEOF
 else
     log_skip "python3 unavailable — probe-redis/probe-opcache tests skipped"
 fi
+
+################################################################################
+# SECTION 23: Safety hardening (restart RCE guard, fail-closed, root gate, vhost health)
+################################################################################
+log_section "Safety Hardening Tests"
+
+# verified_restart must NOT eval the restart command: an injected metacharacter
+# payload must be refused and must never execute.
+SAFE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/lso-safe.XXXXXX")
+inj_out=$(
+    LOG_FILE="${SAFE_TMP}/log"; : > "$LOG_FILE"
+    log_info() { :; }; log_warn() { :; }; log_error() { echo "ERR:$*"; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    LSO_SKIP_RESTART=0
+    unset LSO_FS_ROOT
+    LSO_RESTART_CMD="true; touch ${SAFE_TMP}/pwned"
+    verified_restart && echo "RC:0" || echo "RC:1"
+)
+if [ ! -e "${SAFE_TMP}/pwned" ] && echo "$inj_out" | grep -q "RC:1"; then
+    log_pass "restart: command-injection payload refused, not executed (no eval)"
+else
+    log_fail "restart: injection executed or not refused: ${inj_out} pwned=$([ -e "${SAFE_TMP}/pwned" ] && echo yes || echo no)"
+fi
+
+# Empty restart command must FAIL CLOSED (return 1), not silently succeed.
+empty_rc=$(
+    LOG_FILE="${SAFE_TMP}/log2"; : > "$LOG_FILE"
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    LSO_SKIP_RESTART=0
+    unset LSO_FS_ROOT
+    LSO_RESTART_CMD=""
+    verified_restart && echo "RC:0" || echo "RC:1"
+)
+if echo "$empty_rc" | grep -q "RC:1"; then
+    log_pass "restart: empty restart command fails closed (return 1)"
+else
+    log_fail "restart: empty restart command did not fail closed: ${empty_rc}"
+fi
+
+# health_check must fail when the real-vhost baseline regresses even if the
+# loopback URL is fine (the masked-broken-vhost case).
+vhost_rc=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }
+    http_status() { if [ "$1" = "http://vhost/" ]; then echo 500; else echo 200; fi; }
+    LSO_BASELINE_URL="http://loop/";  LSO_BASELINE_STATUS=200
+    LSO_BASELINE_VHOST_URL="http://vhost/"; LSO_BASELINE_VHOST_STATUS=200
+    # shrink retries so the test is fast
+    sleep() { :; }
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$vhost_rc" | grep -q "RC:1"; then
+    log_pass "health: broken real vhost fails the check even when loopback is OK"
+else
+    log_fail "health: vhost regression not caught: ${vhost_rc}"
+fi
+
+# health_check passes when both baselined URLs recover same-or-better.
+vhost_ok=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }
+    http_status() { echo 200; }
+    LSO_BASELINE_URL="http://loop/";  LSO_BASELINE_STATUS=200
+    LSO_BASELINE_VHOST_URL="http://vhost/"; LSO_BASELINE_VHOST_STATUS=200
+    sleep() { :; }
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$vhost_ok" | grep -q "RC:0"; then
+    log_pass "health: both URLs same-or-better -> passes"
+else
+    log_fail "health: healthy both-URL case wrongly failed: ${vhost_ok}"
+fi
+
+# health_check: a URL whose baseline was unreachable (000) contributes no HTTP
+# signal — process-up alone passes (no false-fail when baseline was already down).
+base000=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }
+    http_status() { echo 503; }   # would FAIL if it were treated as a signal
+    LSO_BASELINE_URL="http://loop/";  LSO_BASELINE_STATUS=000
+    LSO_BASELINE_VHOST_URL=""; LSO_BASELINE_VHOST_STATUS=""
+    sleep() { :; }
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$base000" | grep -q "RC:0"; then
+    log_pass "health: 000 baseline contributes no signal (process-up passes)"
+else
+    log_fail "health: 000-baseline no-signal case wrongly failed: ${base000}"
+fi
+
+# Root gate: optimize/rollback (no fixture, non-root) must demand root. Skip when
+# the suite itself runs as root (gate is correctly bypassed then).
+if [ "$(id -u)" -ne 0 ]; then
+    gate_opt=$(LSO_DATA_DIR="$SAFE_TMP" "${OPTIMIZER}" optimize --profile generic 2>&1 || true)
+    if echo "$gate_opt" | grep -qi "must run as root"; then
+        log_pass "root gate: optimize refuses to run as non-root (no fixture)"
+    else
+        log_fail "root gate: optimize did not require root: $(echo "$gate_opt" | head -1)"
+    fi
+    gate_rb=$(LSO_DATA_DIR="$SAFE_TMP" "${OPTIMIZER}" rollback 20260101-000000 2>&1 || true)
+    if echo "$gate_rb" | grep -qi "must run as root"; then
+        log_pass "root gate: rollback refuses to run as non-root (no fixture)"
+    else
+        log_fail "root gate: rollback did not require root: $(echo "$gate_rb" | head -1)"
+    fi
+else
+    log_skip "root gate test skipped (suite running as root)"
+fi
+rm -rf "$SAFE_TMP"
 
 ################################################################################
 # Summary

@@ -234,6 +234,8 @@ restore_backup_files() {
             [ -f "$site_dir/.docroot" ] || continue
             local docroot
             docroot=$(cat "$site_dir/.docroot")
+            # Reject traversal / empty (tampered backup -> arbitrary write as root)
+            case "$docroot" in ''|*..*) log_warn "Unsafe docroot in backup ($docroot) — skipping"; continue ;; esac
             if [ -d "$docroot" ] && [ -f "$site_dir/.htaccess" ]; then
                 log_info "Restoring $docroot/.htaccess ..."
                 cp -a "$site_dir/.htaccess" "$docroot/.htaccess"
@@ -267,6 +269,42 @@ restore_backup_files() {
         elif [ -d "$(_bk_fs /etc/my.cnf.d)" ]; then
             rsync -a --delete "$backup_path/mariadb/" "$(_bk_fs /etc/my.cnf.d)/"
         fi
+    fi
+
+    # 6. LSCWP plugin options — the inverse of the pre-change `litespeed-option
+    # export` the lscwp feature wrote into <backup>/lscwp/<slug>.json. Without
+    # this, rollback restores server files but leaves LSCWP options changed
+    # (SPEC §7). Best-effort: needs wp-cli + a working WP install, so failures
+    # warn but never abort the file restore. Guarded by lso_wp so the backup
+    # unit test (which sources backup.sh alone) skips it.
+    if [ -d "$backup_path/lscwp" ] && type -t lso_wp &>/dev/null; then
+        local json docroot_file lscwp_docroot
+        for json in "$backup_path/lscwp"/*.json; do
+            [ -f "$json" ] && [ -s "$json" ] || continue
+            docroot_file="${json%.json}.docroot"
+            if [ ! -f "$docroot_file" ]; then
+                log_warn "No docroot sidecar for $(basename "$json") — skipping LSCWP restore"
+                continue
+            fi
+            lscwp_docroot=$(cat "$docroot_file")
+            # Reject traversal / empty (tampered backup -> arbitrary wp target)
+            case "$lscwp_docroot" in
+                ''|*..*) log_warn "Unsafe docroot in backup ($lscwp_docroot) — skipping LSCWP restore"; continue ;;
+            esac
+            # Must be a real WordPress docroot (wp-config.php present) — defends
+            # against a sidecar pointing at an absolute non-WP path like /etc.
+            if [ ! -f "${lscwp_docroot%/}/wp-config.php" ]; then
+                log_warn "No wp-config.php under $lscwp_docroot — skipping LSCWP restore"
+                continue
+            fi
+            if [ -d "$lscwp_docroot" ]; then
+                log_info "Restoring LSCWP options -> $lscwp_docroot"
+                lso_wp "$lscwp_docroot" litespeed-option import "$json" >/dev/null 2>&1 \
+                    || log_warn "LSCWP option import failed for $lscwp_docroot (file restore still applied)"
+            else
+                log_warn "Docroot gone ($lscwp_docroot) — skipping LSCWP restore"
+            fi
+        done
     fi
 
     return 0

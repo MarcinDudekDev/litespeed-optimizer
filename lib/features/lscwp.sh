@@ -352,10 +352,16 @@ _lscwp_apply_site() {
     site_slug=$(basename "$(dirname "$docroot")")-$(basename "$docroot")
     if [ "${DRY_RUN:-false}" != true ]; then
         mkdir -p "${backup_root}/lscwp"
-        if lso_wp "$docroot" litespeed-option export > "${backup_root}/lscwp/${site_slug}.json" 2>/dev/null; then
+        # Export only counts if it produced a non-empty file. Write a .docroot
+        # sidecar so rollback can map this export back to its site (the slug is
+        # lossy — two trees can collapse to the same basename pair).
+        if lso_wp "$docroot" litespeed-option export > "${backup_root}/lscwp/${site_slug}.json" 2>/dev/null \
+            && [ -s "${backup_root}/lscwp/${site_slug}.json" ]; then
+            printf '%s\n' "$docroot" > "${backup_root}/lscwp/${site_slug}.docroot"
             log_info "LSCWP options exported: ${backup_root}/lscwp/${site_slug}.json"
         else
-            log_warn "LSCWP option export failed (continuing)"
+            rm -f "${backup_root}/lscwp/${site_slug}.json"
+            log_warn "LSCWP option export failed (continuing — rollback won't restore LSCWP options for this site)"
         fi
     fi
 

@@ -507,6 +507,37 @@ cmd_analyze() {
 }
 
 cmd_optimize() {
+    # optimize restarts LiteSpeed and writes server config — require root unless
+    # this is a dry-run or a fixture-tree test (LSO_FS_ROOT set).
+    if [ "$DRY_RUN" = false ] && [ -z "${LSO_FS_ROOT:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        log_error "optimize must run as root (it restarts LiteSpeed and writes config). Re-run with sudo."
+        exit 1
+    fi
+
+    # Snapshot the pre-change health baseline BEFORE touching anything, so the
+    # post-restart health check can detect a regression. Resolve the real vhost
+    # URL from the target (or first) WordPress site (catches a broken vhost the
+    # default 127.0.0.1 vhost would otherwise mask). Skipped in fixture/test mode.
+    if [ "$DRY_RUN" = false ] && [ "${LSO_SKIP_RESTART:-0}" != "1" ] && [ -z "${LSO_FS_ROOT:-}" ] \
+        && type -t snapshot_baseline &>/dev/null; then
+        # Detection populates LSO_WP_SITES — without it the vhost URL never
+        # resolves and the masked-broken-vhost check silently no-ops. Idempotent:
+        # create_backup/apply_optimizations re-detect only if LSO_LSWS_ROOT unset.
+        if [ "${#LSO_WP_SITES[@]}" -eq 0 ] && type -t detect_environment &>/dev/null; then
+            detect_environment || true
+        fi
+        local _vhost_site="" _vhost_url=""
+        if [ -n "${TARGET_SITE:-}" ] && [ -d "${TARGET_SITE:-}" ]; then
+            _vhost_site="$TARGET_SITE"
+        elif [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
+            _vhost_site="${LSO_WP_SITES[0]}"
+        fi
+        if [ -n "$_vhost_site" ] && type -t lso_wp &>/dev/null; then
+            _vhost_url=$(lso_wp "$_vhost_site" option get home 2>/dev/null | tr -d '\r') || _vhost_url=""
+        fi
+        snapshot_baseline "$_vhost_url"
+    fi
+
     # Create backup first (skip on dry-run)
     if [ "$DRY_RUN" = false ]; then
         if type -t create_backup &>/dev/null; then
@@ -545,18 +576,32 @@ cmd_rollback() {
         exit 1
     fi
 
+    # Validate a supplied timestamp's format first (cheap, no privileges needed)
+    # so a malformed argument is rejected the same way for any user.
+    if [ -n "$backup_timestamp" ] && [[ ! "$backup_timestamp" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+        log_error "Invalid backup timestamp format: $backup_timestamp"
+        log_error "Expected format: YYYYMMDD-HHMMSS (e.g., 20260610-143022)"
+        exit 1
+    fi
+
+    # rollback restores config and restarts LiteSpeed — require root (before any
+    # interactive prompt) unless this is a fixture-tree test (LSO_FS_ROOT set).
+    if [ -z "${LSO_FS_ROOT:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        log_error "rollback must run as root (it restores config and restarts LiteSpeed). Re-run with sudo."
+        exit 1
+    fi
+
     if [ -z "$backup_timestamp" ]; then
         log_info "Available backups:"
         ls -1 "${BACKUP_DIR}" 2>/dev/null | tail -10 || true
         echo ""
         read -rp "Enter backup timestamp to restore: " backup_timestamp
-    fi
-
-    # Validate backup timestamp format (YYYYmmdd-HHMMSS) — no traversal
-    if [[ ! "$backup_timestamp" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
-        log_error "Invalid backup timestamp format: $backup_timestamp"
-        log_error "Expected format: YYYYMMDD-HHMMSS (e.g., 20260610-143022)"
-        exit 1
+        # Validate the prompted value (YYYYmmdd-HHMMSS) — no traversal
+        if [[ ! "$backup_timestamp" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+            log_error "Invalid backup timestamp format: $backup_timestamp"
+            log_error "Expected format: YYYYMMDD-HHMMSS (e.g., 20260610-143022)"
+            exit 1
+        fi
     fi
 
     if type -t restore_backup &>/dev/null; then

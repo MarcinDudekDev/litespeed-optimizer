@@ -63,6 +63,56 @@ _sec_apply_enterprise() {
     log_info "Throttling on Enterprise: set per-client limits in WHM > LiteSpeed WebAdmin (XML is read-only for this tool)"
 }
 
+# Deploy safe security response headers via per-site .htaccess (LiteSpeed honors
+# mod_headers). Marker-delimited + idempotent. Only headers that never break a
+# normal site: nosniff, SAMEORIGIN, Referrer-Policy. HSTS is intentionally NOT
+# set here — it needs HTTPS and a deliberate rollout (a wrong max-age locks users
+# out), so it stays a documented opt-in rather than an automatic change.
+_sec_apply_headers_site() {
+    local docroot="$1"
+    local htaccess="${docroot%/}/.htaccess"
+
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] Would deploy security headers to ${htaccess}"
+        return 0
+    fi
+
+    touch "$htaccess" 2>/dev/null || { log_warn "Cannot write ${htaccess} — skipping headers"; return 0; }
+
+    local tmp
+    tmp=$(secure_mktemp "${docroot%/}/.lso-hdr.XXXXXX") || return 1
+    # Strip any prior block, then append a fresh one (idempotent + updatable).
+    awk '
+        /^# BEGIN litespeed-optimizer headers/ { skip = 1; next }
+        /^# END litespeed-optimizer headers/ { skip = 0; next }
+        !skip { print }
+    ' "$htaccess" > "$tmp"
+    {
+        echo "# BEGIN litespeed-optimizer headers"
+        echo "<IfModule mod_headers.c>"
+        echo "Header set X-Content-Type-Options \"nosniff\""
+        echo "Header set X-Frame-Options \"SAMEORIGIN\""
+        echo "Header set Referrer-Policy \"strict-origin-when-cross-origin\""
+        echo "</IfModule>"
+        echo "# END litespeed-optimizer headers"
+    } >> "$tmp"
+    copy_file_permissions "$htaccess" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$htaccess"
+    log_info "Deployed security headers to ${htaccess}"
+}
+
+_sec_apply_headers() {
+    if [ -z "${LSO_WP_SITES+x}" ] || [ "${#LSO_WP_SITES[@]}" -eq 0 ]; then
+        log_warn "security headers: no WordPress sites detected — skipping (.htaccess is per-site)"
+        return 0
+    fi
+    local docroot
+    for docroot in "${LSO_WP_SITES[@]}"; do
+        [ -d "$docroot" ] || continue
+        _sec_apply_headers_site "$docroot"
+    done
+}
+
 _sec_report_recaptcha() {
     log_info "reCAPTCHA protection: report-only (requires your site keys)"
     echo "  To enable: WebAdmin > Security > CAPTCHA (lsrecaptcha)"
@@ -100,6 +150,10 @@ feature_apply_custom_security() {
         fi
         _sec_apply_ols_throttling "$conf"
     fi
+
+    # Security response headers (per-site .htaccess) — makes the `headers` alias
+    # truthful and satisfies the remote audit's missing-header findings.
+    _sec_apply_headers
 
     _sec_report_recaptcha
     _sec_report_modsec
