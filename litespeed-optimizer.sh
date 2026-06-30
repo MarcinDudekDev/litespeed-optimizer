@@ -58,6 +58,7 @@ SPECIFIC_FEATURE=""
 EXCLUDE_FEATURE=""
 PROFILE="auto"
 TARGET_SITE=""
+LOAD_MODE=false
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the 7 REGISTERED features (lib/features/*.sh); keep this list in
@@ -290,6 +291,8 @@ COMMANDS:
     rollback --list             List available backups
     status [site]               Show which optimizations are applied
     benchmark <url>             Before/after TTFB + cache-hit check (Phase 4)
+    benchmark --load <url>      Concurrent load test (wrk/k6/ab, else parallel
+                                curl); --concurrency N, --duration N (seconds)
     probe-redis [url]           Verify the redis PHP extension in the WEB SAPI
                                 (token-guarded one-shot probe dropped in docroot,
                                 fetched over HTTP, self-deletes). Catches the case
@@ -355,6 +358,12 @@ ENVIRONMENT:
     LSO_FS_ROOT                 Prefix for all absolute paths (testing/fixtures)
     LSO_DATA_DIR                Override data dir (default: ~/.litespeed-optimizer)
     LSO_RAM_MB / LSO_CORES      Override detected RAM/CPU (testing/golden tests)
+    LSO_LOAD_TOOL               benchmark --load tool: wrk|k6|ab|curl (default:
+                                auto-detect; auth forces curl)
+    LSO_LOAD_CONCURRENCY        benchmark --load concurrency (default 10; also
+                                --concurrency)
+    LSO_LOAD_DURATION           benchmark --load duration in seconds (default 10;
+                                also --duration)
     Backups stored in: ${BACKUP_DIR}
     Logs stored in: ${LOG_DIR}
 
@@ -668,6 +677,16 @@ cmd_benchmark() {
         exit 1
     fi
 
+    if [ "$LOAD_MODE" = true ]; then
+        if type -t run_load &>/dev/null; then
+            run_load "$TARGET_SITE"
+        else
+            log_error "Load benchmarking library not loaded"
+            exit 1
+        fi
+        return 0
+    fi
+
     if type -t run_benchmark &>/dev/null; then
         run_benchmark "$TARGET_SITE"
     else
@@ -771,6 +790,26 @@ parse_arguments() {
             --badbots)
                 export LSO_BADBOTS=1
                 shift
+                ;;
+            --load)
+                LOAD_MODE=true
+                shift
+                ;;
+            --concurrency)
+                if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "--concurrency requires a positive integer"
+                    exit 1
+                fi
+                export LSO_LOAD_CONCURRENCY="$2"
+                shift 2
+                ;;
+            --duration)
+                if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "--duration requires a positive integer (seconds)"
+                    exit 1
+                fi
+                export LSO_LOAD_DURATION="$2"
+                shift 2
                 ;;
             --profile)
                 if [ -z "${2:-}" ] || [[ "$2" == -* ]]; then

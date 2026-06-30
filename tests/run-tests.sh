@@ -1706,6 +1706,11 @@ PYEOF
 
     bench_out=$(LSO_BENCH_RUNS=4 LSO_BENCH_CART=0 \
         "${OPTIMIZER}" benchmark "http://127.0.0.1:${BENCH_PORT}/" 2>&1 || true)
+
+    # Load benchmarking (--load). Force the portable curl fallback so the test is
+    # deterministic regardless of whether wrk/k6/ab are installed on the box.
+    load_out=$(LSO_LOAD_TOOL=curl LSO_LOAD_CONCURRENCY=4 LSO_LOAD_DURATION=2 \
+        "${OPTIMIZER}" benchmark --load "http://127.0.0.1:${BENCH_PORT}/" 2>&1 || true)
     kill "$BENCH_PID" 2>/dev/null || true
 
     if echo "$bench_out" | grep -q "Median TTFB"; then
@@ -1723,8 +1728,72 @@ PYEOF
     else
         log_fail "benchmark JSON result missing"
     fi
+
+    # --- Load test (--load, curl fallback) ---
+    if echo "$load_out" | grep -q "Requests/sec"; then
+        log_pass "load: reports requests/sec under concurrency"
+    else
+        log_fail "load: rps line missing: $(echo "$load_out" | tail -3)"
+    fi
+    if echo "$load_out" | grep -qi "tool=curl, concurrency=4"; then
+        log_pass "load: honours LSO_LOAD_TOOL override + concurrency"
+    else
+        log_fail "load: tool/concurrency not honoured"
+    fi
+    # JSON persisted with concurrency fields, and it must be valid JSON.
+    load_json=$(ls -1t "${LSO_DATA_DIR}/benchmarks"/load-*.json 2>/dev/null | head -1)
+    if [ -n "$load_json" ] && \
+       python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if (d["command"]=="load" and "concurrency" in d and "rps" in d and "requests" in d) else 1)' "$load_json" 2>/dev/null; then
+        log_pass "load: persists valid JSON with concurrency/rps/requests fields"
+    else
+        log_fail "load: JSON missing or malformed"
+    fi
 else
     log_skip "python3 unavailable — benchmark live test skipped"
+fi
+
+# Load test degrades gracefully on an unreachable URL (no completed requests).
+load_bad=$(LSO_LOAD_TOOL=curl LSO_LOAD_CONCURRENCY=2 LSO_LOAD_DURATION=1 \
+    "${OPTIMIZER}" benchmark --load "http://127.0.0.1:1/" 2>&1 || true)
+if echo "$load_bad" | grep -qiE "no completed requests|reachable"; then
+    log_pass "load: fails gracefully when no requests complete"
+else
+    log_fail "load: unreachable-URL handling wrong: $(echo "$load_bad" | tail -2)"
+fi
+
+# wrk path must emit VALID JSON. wrk prints latency with a unit suffix
+# ("65.83ms") and requests/sec as a float — a naive parse would write a
+# non-numeric mean into the JSON. Mock a `wrk` on PATH emitting the real format
+# and assert the persisted JSON parses and mean_ttfb_ms is numeric.
+LOAD_WRK_BIN="${TEST_TMP}/loadbin"
+mkdir -p "$LOAD_WRK_BIN"
+cat > "${LOAD_WRK_BIN}/wrk" <<'WRKEOF'
+#!/bin/bash
+cat <<OUT
+Running 2s test @ http://127.0.0.1/
+  4 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    65.83ms   12.34ms 120.00ms   70.00%
+    Req/Sec   500.00     50.00   600.00     80.00%
+  4000 requests in 2.00s, 1.20MB read
+Requests/sec:   2000.00
+Transfer/sec:    600.00KB
+OUT
+WRKEOF
+chmod +x "${LOAD_WRK_BIN}/wrk"
+load_wrk_data="${TEST_TMP}/load-wrk-data"
+mkdir -p "$load_wrk_data"
+PATH="${LOAD_WRK_BIN}:${PATH}" LSO_LOAD_TOOL=wrk LSO_DATA_DIR="$load_wrk_data" \
+    LSO_LOAD_CONCURRENCY=4 LSO_LOAD_DURATION=2 \
+    "${OPTIMIZER}" benchmark --load "http://127.0.0.1:18999/" >/dev/null 2>&1 || true
+load_wrk_json=$(ls -1t "${load_wrk_data}/benchmarks"/load-*.json 2>/dev/null | head -1)
+if [ -n "$load_wrk_json" ] && command -v python3 >/dev/null 2>&1 && \
+   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d["mean_ttfb_ms"]; sys.exit(0 if (d["tool"]=="wrk" and isinstance(v,(int,float)) and d["requests"]==4000 and d["rps"]==2000) else 1)' "$load_wrk_json" 2>/dev/null; then
+    log_pass "load: wrk output parsed into valid JSON (unit-stripped mean, numeric fields)"
+elif ! command -v python3 >/dev/null 2>&1; then
+    log_skip "load: wrk JSON test skipped (no python3)"
+else
+    log_fail "load: wrk JSON invalid or mis-parsed: $(cat "$load_wrk_json" 2>/dev/null)"
 fi
 
 # Unreachable URL fails gracefully
