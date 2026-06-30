@@ -219,9 +219,14 @@ panel_marker() {
     fi
 }
 panel_marker "Plesk"            "/usr/local/psa"      "plesk"
+panel_marker "Plesk(/opt)"      "/opt/psa"            "plesk"
 panel_marker "LiteSpeed ADC"    "/usr/local/lslb"     "adc"
 panel_marker "Enhance"          "/var/local/enhance"  "enhance"
+panel_marker "Enhance(/opt)"    "/opt/enhance"        "enhance"
 panel_marker "aaPanel"          "/www/server/panel"   "aapanel"
+panel_marker "CloudPanel"       "/home/clp"           "cloudpanel"
+panel_marker "Hestia"           "/usr/local/hestia"   "hestia"
+panel_marker "ISPConfig"        "/usr/local/ispconfig" "ispconfig"
 # No marker -> plain (regression guard for the new branches).
 panel_marker "no-marker"        "/var/empty-x"        "plain"
 
@@ -235,6 +240,8 @@ gate_panel() {
         # shellcheck source=/dev/null
         source "${ROOT_DIR}/lib/core/helpers.sh"
         # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/core/detect-env.sh"
+        # shellcheck source=/dev/null
         source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
         LSO_EDITION=ols LSO_PANEL="$panel" LSO_LSWS_ROOT=/x
         resolve_profile_features() { echo ""; }   # empty -> loop no-ops, we only want the policy log
@@ -247,10 +254,46 @@ gate_panel() {
         log_fail "panel gate: ${panel} not restricted: $got"
     fi
 }
-gate_panel plesk
-gate_panel adc
-gate_panel enhance
-gate_panel aapanel
+for _p in directadmin runcloud plesk adc enhance aapanel cloudpanel hestia ispconfig; do
+    gate_panel "$_p"
+done
+
+# security feature: OLS throttling is a SERVER-CONFIG write, so on a restricted
+# panel it must be printed as manual, not written to httpd_config; on plain it is
+# written. (_sec_apply_ols_throttling appends a perClientConnLimit block.)
+sec_panel_throttle() {
+    local panel="$1" expect="$2"  # expect = manual | written
+    local tconf
+    tconf=$(mktemp "${TMPDIR:-/tmp}/lso-secpanel.XXXXXX")
+    printf 'tuning {\n}\n' > "$tconf"
+    (
+        log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { echo "ERR $*" >&2; }
+        feature_register() { :; }   # security.sh calls it at load (registry not sourced here)
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/core/helpers.sh"
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/core/detect-env.sh"
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/core/confedit.sh"
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/features/security.sh"
+        LSO_EDITION=ols LSO_PANEL="$panel" LSO_MAIN_CONF="$tconf"
+        LSO_WP_SITES=()   # no sites -> headers/badbots skip cleanly
+        DRY_RUN=false
+        feature_apply_custom_security >/dev/null 2>&1 || true
+    ) || true
+    local got=written
+    grep -q "perClientConnLimit" "$tconf" || got=manual
+    rm -f "$tconf"
+    if [ "$got" = "$expect" ]; then
+        log_pass "security throttle: ${panel} -> ${got}"
+    else
+        log_fail "security throttle: ${panel} got '${got}', want '${expect}'"
+    fi
+}
+sec_panel_throttle plesk   manual
+sec_panel_throttle enhance manual
+sec_panel_throttle plain   written
 
 # broken-edge: lsws root exists but no main config -> detect must fail cleanly
 if LSO_FS_ROOT="${CONFIGS_DIR}/broken-edge" "${OPTIMIZER}" detect 2>/dev/null; then

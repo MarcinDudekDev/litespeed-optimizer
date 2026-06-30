@@ -479,10 +479,12 @@ cmd_check() {
             log_warn "cPanel detected — server tuning applied via Apache include + .htaccess only"
             warnings=$((warnings + 1))
             ;;
-        directadmin|runcloud|plesk|adc|enhance|aapanel)
-            log_warn "${LSO_PANEL} detected — server config writes are MANUAL-STEPS-ONLY"
-            log_warn "  (panel regeneration/ownership clobbers direct edits; server-tuning/lsapi/lscache become manual steps — opcache/lscwp/woocommerce/security still apply)"
-            warnings=$((warnings + 1))
+        *)
+            if type -t _lso_panel_restricted >/dev/null 2>&1 && _lso_panel_restricted; then
+                log_warn "${LSO_PANEL} detected — server config writes are MANUAL-STEPS-ONLY"
+                log_warn "  (panel regeneration/ownership clobbers direct edits; server-tuning/lsapi/lscache + security throttling become manual steps — opcache/lscwp/woocommerce + .htaccess hardening still apply)"
+                warnings=$((warnings + 1))
+            fi
             ;;
     esac
 
