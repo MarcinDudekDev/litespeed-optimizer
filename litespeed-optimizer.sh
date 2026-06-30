@@ -576,10 +576,16 @@ cmd_optimize() {
         elif [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
             _vhost_site="${LSO_WP_SITES[0]}"
         fi
+        local _woo_base=""
         if [ -n "$_vhost_site" ] && type -t lso_wp &>/dev/null; then
             _vhost_url=$(lso_wp "$_vhost_site" option get home 2>/dev/null | tr -d '\r') || _vhost_url=""
+            # If the site runs WooCommerce, baseline its cart/checkout/Store-API so
+            # the post-restart gate catches a checkout that a change starts 403'ing.
+            if [ -n "$_vhost_url" ] && lso_wp "$_vhost_site" plugin is-active woocommerce >/dev/null 2>&1; then
+                _woo_base="$_vhost_url"
+            fi
         fi
-        snapshot_baseline "$_vhost_url"
+        snapshot_baseline "$_vhost_url" "$_woo_base"
     fi
 
     # Create backup first (skip on dry-run)

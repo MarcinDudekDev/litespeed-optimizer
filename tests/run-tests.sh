@@ -3313,6 +3313,104 @@ else
     log_fail "health: healthy both-URL case wrongly failed: ${vhost_ok}"
 fi
 
+# --- Woo smoke gate (Prereq A): a checkout that worked at baseline (200) but now
+# 403s (ModSec/CAPTCHA) MUST fail the gate — the generic same-or-better check
+# misses it because it treats 4xx as "ok". ---
+woo_403=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }
+    sleep() { :; }
+    # Baseline: everything 200. Then checkout starts 403'ing.
+    http_status() { case "$1" in *"/checkout/") echo 403 ;; *) echo 200 ;; esac; }
+    LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
+    LSO_BASELINE_VHOST_URL="http://shop/"; LSO_BASELINE_VHOST_STATUS=200
+    LSO_BASELINE_WOO_URLS=("http://shop/cart/" "http://shop/checkout/" "http://shop/wp-json/wc/store/v1/products")
+    LSO_BASELINE_WOO_STATUS=(200 200 200)
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$woo_403" | grep -q "RC:1"; then
+    log_pass "woo gate: new 403 on checkout fails the health gate (homepage-200 blind spot closed)"
+else
+    log_fail "woo gate: checkout 403 not caught: ${woo_403}"
+fi
+# Contrast: the OLD generic check PASSES that same 403 (4xx = "ok"); the Woo
+# check fails it. Stub http_status to 403 to isolate the 4xx contrast.
+woo_contrast=$(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    http_status() { echo 403; }
+    _health_url_ok "http://shop/checkout/" 200 && echo "GENERIC:pass" || echo "GENERIC:fail"
+    _health_woo_url_ok "http://shop/checkout/" 200 && echo "WOO:pass" || echo "WOO:fail"
+)
+if echo "$woo_contrast" | grep -q "GENERIC:pass" && echo "$woo_contrast" | grep -q "WOO:fail"; then
+    log_pass "woo gate: stricter than generic check (generic passes 403, woo fails it)"
+else
+    log_fail "woo gate: strictness contrast wrong: ${woo_contrast}"
+fi
+# Healthy Woo flows pass.
+woo_ok=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }; sleep() { :; }
+    http_status() { echo 200; }
+    LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
+    LSO_BASELINE_WOO_URLS=("http://shop/cart/" "http://shop/checkout/")
+    LSO_BASELINE_WOO_STATUS=(200 200)
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$woo_ok" | grep -q "RC:0"; then
+    log_pass "woo gate: all Woo flows still 2xx -> passes"
+else
+    log_fail "woo gate: healthy Woo case wrongly failed: ${woo_ok}"
+fi
+# A flow already broken at baseline (403) is NOT attributed to us (no false fail).
+woo_pre=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }; sleep() { :; }
+    http_status() { echo 403; }   # checkout still 403 after, but it was 403 before too
+    LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
+    LSO_BASELINE_WOO_URLS=("http://shop/checkout/"); LSO_BASELINE_WOO_STATUS=(403)
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$woo_pre" | grep -q "RC:0"; then
+    log_pass "woo gate: pre-existing checkout 403 not attributed to the run (no false fail)"
+else
+    log_fail "woo gate: pre-broken checkout wrongly failed the gate: ${woo_pre}"
+fi
+# snapshot_baseline populates the Woo arrays only when a woo base URL is given.
+woo_snap=$(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    http_status() { echo 200; }
+    snapshot_baseline "http://shop/" "http://shop/"
+    echo "n=${#LSO_BASELINE_WOO_URLS[@]} first=${LSO_BASELINE_WOO_URLS[0]:-}"
+)
+if echo "$woo_snap" | grep -q "n=3 first=http://shop/cart/"; then
+    log_pass "woo gate: snapshot_baseline records cart/checkout/Store-API when site is Woo"
+else
+    log_fail "woo gate: snapshot Woo baseline wrong: ${woo_snap}"
+fi
+woo_nosnap=$(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    http_status() { echo 200; }
+    snapshot_baseline "http://shop/"
+    echo "n=${#LSO_BASELINE_WOO_URLS[@]}"
+)
+if echo "$woo_nosnap" | grep -q "n=0"; then
+    log_pass "woo gate: non-Woo run baselines no Woo flows (gate is a no-op)"
+else
+    log_fail "woo gate: Woo baseline set without a woo base URL: ${woo_nosnap}"
+fi
+
 # health_check: a URL whose baseline was unreachable (000) contributes no HTTP
 # signal — process-up alone passes (no false-fail when baseline was already down).
 base000=$(
