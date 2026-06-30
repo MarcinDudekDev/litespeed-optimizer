@@ -24,6 +24,8 @@ LSO_BASELINE_URL="http://127.0.0.1/"
 # known) — catches a broken real vhost that the default 127.0.0.1 vhost hides.
 LSO_BASELINE_VHOST_URL=""
 LSO_BASELINE_VHOST_STATUS=""
+# Why the last restart attempt failed (for accurate rollback messaging)
+LSO_RESTART_FAIL_REASON=""
 
 ################################################################################
 # Health Checks
@@ -121,6 +123,7 @@ verified_restart() {
         # Fail closed: we applied changes but cannot restart to activate/verify
         # them, so we must not report success. Caller rolls back. Set
         # LSO_SKIP_RESTART=1 to intentionally skip (handled above).
+        LSO_RESTART_FAIL_REASON="no restart command available"
         log_error "No restart command available — cannot activate/verify changes"
         return 1
     fi
@@ -130,19 +133,30 @@ verified_restart() {
     # arguments (which simply fail), closing the root-RCE vector eval opened.
     case "$LSO_RESTART_CMD" in
         *';'*|*'|'*|*'&'*|*'$('*|*'`'*|*'>'*|*'<'*)
+            LSO_RESTART_FAIL_REASON="restart command rejected (shell metacharacters)"
             log_error "Refusing restart command with shell metacharacters: ${LSO_RESTART_CMD}"
             return 1 ;;
     esac
     log_info "Restarting LiteSpeed: ${LSO_RESTART_CMD}"
+    # noglob so an unquoted * / ? / [ in the command can never pathname-expand;
+    # combined with the metachar guard the word-split is purely "cmd arg arg".
+    set -f
     # shellcheck disable=SC2086  # intentional word-split of a validated command
     if ! $LSO_RESTART_CMD >> "${LOG_FILE}" 2>&1; then
+        set +f
+        LSO_RESTART_FAIL_REASON="restart command failed"
         log_error "Restart command failed"
         return 1
     fi
+    set +f
 
     # Give the server a moment before first probe
     sleep 2
-    health_check
+    if health_check; then
+        return 0
+    fi
+    LSO_RESTART_FAIL_REASON="health check did not pass after restart"
+    return 1
 }
 
 # verified_restart_or_rollback
@@ -152,6 +166,8 @@ verified_restart_or_rollback() {
         log_info "[DRY RUN] Would restart LiteSpeed and verify health"
         return 0
     fi
+
+    LSO_RESTART_FAIL_REASON=""
 
     # Pre-check: lint the OLS main config before risking a restart
     if [ "${LSO_EDITION:-}" = "ols" ] && [ -n "${LSO_MAIN_CONF:-}" ] && type -t ols_lint &>/dev/null; then
@@ -165,7 +181,9 @@ verified_restart_or_rollback() {
         return 0
     fi
 
-    log_error "Health check FAILED after restart — restoring backup"
+    # Report the ACTUAL reason — the restart may never have run (empty command
+    # or metacharacter refusal), so "health check failed" would mislead.
+    log_error "Restart/health check failed (${LSO_RESTART_FAIL_REASON:-unknown}) — restoring backup"
     _auto_restore_and_die
 }
 

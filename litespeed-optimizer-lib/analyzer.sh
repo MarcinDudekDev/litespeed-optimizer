@@ -58,9 +58,12 @@ _az_check() {
     esac
 
     if [ "${JSON_OUTPUT:-false}" = true ]; then
-        local entry
+        local entry jweight="$weight"
+        # warn is advisory: it never contributes to the score, so report weight 0
+        # to consumers that sum weights without inspecting status.
+        [ "$status" = warn ] && jweight=0
         entry=$(printf '{"category":"%s","check":"%s","status":"%s","weight":%s,"fix":"%s"}' \
-            "$category" "$name" "$status" "$weight" "$fix")
+            "$category" "$name" "$status" "$jweight" "$fix")
         if [ -n "$_AZ_JSON_ITEMS" ]; then
             _AZ_JSON_ITEMS="${_AZ_JSON_ITEMS},${entry}"
         else

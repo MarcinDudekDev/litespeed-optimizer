@@ -67,7 +67,7 @@ _rm_woo_block_check() {
     [ -s "$_RM_BODY_FILE" ] || return 0
     # Rendered block wrappers (front-end) and the raw block comment (editor markup
     # that survives on pages with block rendering disabled): woocommerce/cart|checkout
-    if grep -Eqi "wp-block-woocommerce-${page}|wc-block-${page}|<!-- *wp:woocommerce/${page}|data-block[_-]name=\"woocommerce/${page}\"" "$_RM_BODY_FILE"; then
+    if grep -Eqi "wp-block-woocommerce-${page}|wc-block-${page}([^-]|\$)|<!-- *wp:woocommerce/${page}|data-block[_-]name=\"woocommerce/${page}\"" "$_RM_BODY_FILE"; then
         _az_check 2 woo "${page} page (${page_url}) uses WooCommerce blocks — block-disabling perf tweaks render the empty-${page} fallback regardless of real cart contents (checkout silently breaks; the page still returns 200)" warn \
             "if you disable WC blocks anywhere, switch this page to the [woocommerce_${page}] shortcode; otherwise verify ${page} still works after any block-stripping optimization"
     fi

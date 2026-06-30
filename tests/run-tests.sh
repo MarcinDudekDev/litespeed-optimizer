@@ -585,6 +585,53 @@ else
     log_fail "verify_restored_files reports mismatches"
 fi
 
+# 5. LSCWP option rollback: restore_backup_files must `litespeed-option import`
+#    the pre-change export back into its recorded docroot (was never done).
+LSCWP_RB_DR="${TEST_TMP}/lscwp-rb-docroot"; mkdir -p "$LSCWP_RB_DR"
+LSCWP_RB_BK="${TEST_TMP}/lscwp-rb-backup"; mkdir -p "${LSCWP_RB_BK}/lscwp"
+printf '{"opt":"old"}\n' > "${LSCWP_RB_BK}/lscwp/site.json"
+printf '%s\n' "$LSCWP_RB_DR" > "${LSCWP_RB_BK}/lscwp/site.docroot"
+LSCWP_RB_LOG="${TEST_TMP}/lscwp-rb.log"; : > "$LSCWP_RB_LOG"
+(
+    set -euo pipefail
+    LOG_FILE="${TEST_TMP}/lscwp-rb-run.log"; : > "$LOG_FILE"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    lso_wp() { echo "$*" >> "$LSCWP_RB_LOG"; }   # mock: log the import call
+    restore_backup_files "$LSCWP_RB_BK"
+) >/dev/null 2>&1 || true
+if grep -q "litespeed-option import" "$LSCWP_RB_LOG" && grep -q "site.json" "$LSCWP_RB_LOG" \
+    && grep -q "$LSCWP_RB_DR" "$LSCWP_RB_LOG"; then
+    log_pass "rollback restores LSCWP options (litespeed-option import into recorded docroot)"
+else
+    log_fail "rollback did not import LSCWP options: $(tr -d '\n' < "$LSCWP_RB_LOG")"
+fi
+
+# 6. Traversal guard: a tampered .docroot with .. must be refused (no import)
+LSCWP_TR_BK="${TEST_TMP}/lscwp-tr-backup"; mkdir -p "${LSCWP_TR_BK}/lscwp"
+printf '{"opt":"x"}\n' > "${LSCWP_TR_BK}/lscwp/evil.json"
+printf '%s\n' "../../etc" > "${LSCWP_TR_BK}/lscwp/evil.docroot"
+LSCWP_TR_LOG="${TEST_TMP}/lscwp-tr.log"; : > "$LSCWP_TR_LOG"
+(
+    set -euo pipefail
+    LOG_FILE="${TEST_TMP}/lscwp-tr-run.log"; : > "$LOG_FILE"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    lso_wp() { echo "$*" >> "$LSCWP_TR_LOG"; }
+    restore_backup_files "$LSCWP_TR_BK"
+) >/dev/null 2>&1 || true
+if [ ! -s "$LSCWP_TR_LOG" ]; then
+    log_pass "rollback refuses traversal docroot (.. in sidecar -> no import)"
+else
+    log_fail "rollback imported into unsafe docroot: $(tr -d '\n' < "$LSCWP_TR_LOG")"
+fi
+
 ################################################################################
 # SECTION 9: Transaction Primitives
 ################################################################################
@@ -2433,6 +2480,25 @@ if echo "$vhost_ok" | grep -q "RC:0"; then
     log_pass "health: both URLs same-or-better -> passes"
 else
     log_fail "health: healthy both-URL case wrongly failed: ${vhost_ok}"
+fi
+
+# health_check: a URL whose baseline was unreachable (000) contributes no HTTP
+# signal — process-up alone passes (no false-fail when baseline was already down).
+base000=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }
+    http_status() { echo 503; }   # would FAIL if it were treated as a signal
+    LSO_BASELINE_URL="http://loop/";  LSO_BASELINE_STATUS=000
+    LSO_BASELINE_VHOST_URL=""; LSO_BASELINE_VHOST_STATUS=""
+    sleep() { :; }
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$base000" | grep -q "RC:0"; then
+    log_pass "health: 000 baseline contributes no signal (process-up passes)"
+else
+    log_fail "health: 000-baseline no-signal case wrongly failed: ${base000}"
 fi
 
 # Root gate: optimize/rollback (no fixture, non-root) must demand root. Skip when
