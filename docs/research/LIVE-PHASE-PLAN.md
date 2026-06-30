@@ -5,6 +5,24 @@
 deferred live-server items: ModSecurity/OWASP CRS, fail2ban, reCAPTCHA (lsrecaptcha), QUIC.cloud
 onboarding, plus the Plesk/ADC panel gap and two SHARED code prerequisites the live items depend on.
 
+## Item 0 — OFFLINE FOUNDATION: DONE (PRs #32–#35, merged, grok-reviewed, 337→354 tests)
+- **0a** (PR #32) managed-panel detection (Plesk/ADC/Enhance/aaPanel/CloudPanel/Hestia/ISPConfig) →
+  manual-only server config, via `_lso_panel_restricted`; security throttling is panel-aware too.
+- **0b** (PR #33) `--trusted-ip` allowlist + `LSO_TRUSTED_IPS`; exempts trusted IPs from the bad-bot
+  blocker (dual 2.4/2.2 authz); the same allowlist feeds fail2ban ignoreip / throttling / CAPTCHA later.
+- **0c** (PR #34, Prereq A) WooCommerce smoke gate in the validator: baselines cart/checkout/Store-API
+  (real permalinks via `wc_get_*_url()`), strict 2xx/3xx-stays-2xx/3xx, rolls back on a new checkout 403.
+- **0d** (PR #35, Prereq B) `/etc/fail2ban` in backup + rollback (ModSec/CRS under conf/owasp already
+  covered; apt packages are not rolled back).
+
+### Carry-forward follow-ups for the LIVE items (grok-flagged, deferred to their PRs)
+- **Item 1 (fail2ban):** also handle the active ban DB (`/var/lib/fail2ban`) on rollback — `fail2ban-client
+  unban --all` or a service restart after the config restore, so a ban placed during the bad run is cleared.
+  Add the server's own IP + `--trusted-ip` set to `ignoreip` so the Woo smoke-gate self-probes aren't banned.
+- **Item 2 (ModSec):** if it writes `/etc/logrotate.d/*` for audit-log rotation, add that path to the
+  drop-in backup loop. Keep ModSec in DetectionOnly on first apply so the smoke-gate probes can't be 403'd.
+- **Verifier:** `verify_restored_files` only checksums `lsws-conf` (same gap as redis/sysctl) — optional.
+
 ## Context
 Test box = the PUBLIC WooCommerce demo at litespeed-demo.marcindudek.dev (OLS 1.9.0 Open, Ubuntu 24.04,
 lsphp82/83/84, wp-cli, LSWS root under usr/local/lsws). Memory: `lsdemo-live-server-access`. Because it
