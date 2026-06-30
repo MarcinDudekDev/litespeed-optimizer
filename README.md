@@ -11,8 +11,9 @@ Sibling project of [nginx-optimizer](https://github.com/MarcinDudekDev/nginx-opt
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![lint: shellcheck](https://img.shields.io/badge/lint-shellcheck-brightgreen.svg)](https://www.shellcheck.net/)
 [![bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-lightgrey.svg)](#requirements)
+[![version](https://img.shields.io/badge/version-0.7.5-blue.svg)](CHANGELOG.md)
 
-**v0.7.0** — phases 1–4 complete (detect · tune · WordPress/WooCommerce · security/analyze/benchmark) plus the no-SSH workflows (`analyze --remote`, `export-profile`) and the web-SAPI probes (`probe-redis`, `probe-opcache`). Runs on a live server today; see the [roadmap](ROADMAP.md) for what's next.
+Detect → audit → tune → verify, with a timestamped backup and an automatic rollback behind every change. It covers RAM-tier server tuning, WordPress/WooCommerce cache safety, security hardening, a scored 0–100 audit, benchmarking, no-SSH remote analysis (`analyze --remote`, `export-profile`), and web-SAPI probes for the gaps CLI tools miss (`probe-redis`, `probe-opcache`). See the [roadmap](ROADMAP.md) for what's planned next.
 
 **Contents:** [Commands](#commands) · [Compatibility](#compatibility) · [Benchmarks](#benchmarks--live-demo) · [Install](#install) · [Usage](#usage) · [Example output](#example-output) · [Safety model](#safety-model) · [Troubleshooting](#troubleshooting) · [Uninstall](#uninstall) · [Testing](#testing) · [Requirements](#requirements) · [Security & contributing](#security--contributing)
 
@@ -47,13 +48,13 @@ Read-only commands (`detect` / `analyze` / `status` / `benchmark`) work on **any
 | LiteSpeed Enterprise (LSWS) | ✅ | ⚠️ server tuning is **report-only** (XML never edited); LSCWP / WooCommerce / `.htaccess` changes still apply |
 | No SSH (any host) | ✅ via `analyze --remote` + `export-profile` | — |
 
-Non-standard install path → set `LSO_LSWS_ROOT`. **Exercised against:** the `litespeedtech/openlitespeed` Docker image (E2E), a real OpenLiteSpeed 1.9 + lsphp 8.3 + MariaDB box (benchmark + live demo), a production WooCommerce restore (mltools.pl pilot), and detection fixtures for plain-OLS / CyberPanel / cPanel-Enterprise / DirectAdmin. LSCWP features require plugin ≥6.5.1 (CVE gate). Bash 3.2 (macOS) through 5.x (Linux).
+Non-standard install path → set `LSO_LSWS_ROOT`. **Tested on:** the official `litespeedtech/openlitespeed` Docker image (end-to-end), a live OpenLiteSpeed + lsphp 8.3 + MariaDB server, a production WooCommerce site, and detection fixtures for plain OLS / CyberPanel / cPanel + Enterprise / DirectAdmin. LSCWP features require plugin ≥ 6.5.1 (CVE gate). Runs on Bash 3.2 (macOS) through 5.x (Linux).
 
 ## Benchmarks & live demo
 
 LiteSpeed (OpenLiteSpeed + LSCache + lsphp 8.3 + MariaDB) was benchmarked head-to-head against a matched **FrankenPHP/Caddy** WooCommerce stack on equivalent hardware. Even with FrankenPHP in worker mode, **LiteSpeed was ~25% faster on uncached render and ~6.6× faster on the cart path** — the gap is engine/SAPI-level, not a process-model artifact. Methodology + per-pass probes:
 
-- [Pass-2 report](docs/reports/litespeed-vs-frankenphp-pass2.html) · [Pass-3 report — matched worker mode](docs/reports/litespeed-vs-frankenphp-pass3.html)
+- [Pass-2 report](https://htmlpreview.github.io/?https://github.com/MarcinDudekDev/litespeed-optimizer/blob/main/docs/reports/litespeed-vs-frankenphp-pass2.html) · [Pass-3 report — matched worker mode](https://htmlpreview.github.io/?https://github.com/MarcinDudekDev/litespeed-optimizer/blob/main/docs/reports/litespeed-vs-frankenphp-pass3.html) (rendered HTML; raw files in [`docs/reports/`](docs/reports/))
 
 **Live LiteSpeed reference:** [litespeed-demo.marcindudek.dev](https://litespeed-demo.marcindudek.dev) — a 500-product WooCommerce store on the real stack (LSCWP full-page cache + Redis); cached pages return in single-digit milliseconds (`x-litespeed-cache: hit`).
 
@@ -67,7 +68,7 @@ cd litespeed-optimizer && ./install.sh
 ## Usage
 
 ```bash
-litespeed-optimizer --version           # litespeed-optimizer version 0.5.0
+litespeed-optimizer --version           # litespeed-optimizer version 0.7.5
 litespeed-optimizer detect              # what am I running?
 litespeed-optimizer check               # safe to optimize?
 litespeed-optimizer optimize --dry-run  # preview all changes
