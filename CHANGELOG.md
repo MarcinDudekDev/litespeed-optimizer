@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.0] - 2026-06-30 (offline roadmap cleared — multi-site, bad-bot blocker, load testing, atomic optimize)
+
+Five PRs (#24–#30) clearing every offline-implementable roadmap item, each independently grok-reviewed. Live-server work (ModSecurity/CRS, fail2ban, reCAPTCHA/QUIC.cloud) stays deferred.
+
+### Added
+- **Bad-bot / scraper UA blocker** (`--badbots` / `LSO_BADBOTS=1`, PR #28) — opt-in per-site `.htaccess` UA denylist via `mod_setenvif` with dual 2.4 (`mod_authz_core`) / 2.2 (`Order/Deny`) syntax, module-guarded so it no-ops rather than 500s. Conservative list that excludes every major search engine. Scored in `analyze` (marker + `lso_bad_bot` rule) and probed remotely (one benign scraper-UA request → 403/406/429/444 = blocked, informational, no over-attribution).
+- **Concurrent load benchmarking** (`benchmark --load`, PR #29) — prefers `wrk` > `k6` > `ab`, falls back to a portable backgrounded parallel-curl generator so it always works. `--concurrency N` / `--duration N`; `LSO_LOAD_TOOL/_CONCURRENCY/_DURATION`. JSON persisted with concurrency fields; HTTP auth forces the curl path (only it plumbs `--config`). Offline measures the harness, not production capacity.
+
+### Changed / Fixed
+- **Atomic all-or-nothing optimize** (PR #30) — the transaction engine is finally wired into `apply_optimizations`: server-config edits stage to per-file temps and commit together; the EXIT/INT/TERM-trap rollback is now live (was dead code). Rollback is scoped to config-write failures (a non-config feature failure no longer discards earlier valid server config) and catches *swallowed* write failures via a write-error counter (a feature can't return success after a failed `ols_set` and commit partial config). `ols_get`/`ols_get_env` read-your-writes keeps feature self-verification guards (e.g. lscache's `enableCache=0`) working against staged values.
+- **Multi-site `TARGET_SITE` resolution** (PR #27) — shared `_resolve_target_docroot` (exact-path / URL-host / parent-dir / unique-basename, all anchored or unique); replaced the loose substring vhost match in the lscwp/woocommerce apply loops that could target a `*-staging` sibling, and the hardcoded first-site in analyze/detect.
+- **JSON escaping** (`json_escape`, PR #24) — every JSON string field is escaped, so a quote/backslash/newline in a path or header no longer produces invalid JSON.
+- **HTTP basic-auth off the argv** (PR #25) — passed via a mode-600 curl `--config` file instead of `--user` (was visible in `ps`).
+
+### Tests
+- 259 → **315** (+56). New coverage: resolver ladder (exact/slug/URL/parent, ambiguous → fail); bad-bot apply (opt-out default, dual authz, no search-engine false positives, idempotent) + scored audit; load fallback + mock-`wrk` JSON validity + graceful degrade; transaction read-your-writes, all-or-nothing config-failure vs non-config-failure vs swallowed-write rollback, multi-feature commit, no-temps. `shellcheck --severity=error` clean (0 warnings) throughout; bash 3.2 compatible.
+
 ## [0.7.5] - 2026-06-18 (graceful lsphp recycle — prevent torn object-cache writes)
 
 ### Fixed

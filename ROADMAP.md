@@ -20,13 +20,15 @@ Canonical spec: docs/research/SPEC.md
 - [x] **Root gate** on `optimize`/`rollback`.
 - [x] **Security response headers** — `security` feature deploys `X-Content-Type-Options`/`X-Frame-Options`/`Referrer-Policy` via `.htaccess` (the `headers` alias was previously a no-op).
 
-## v0.3+ — remaining
-Offline-implementable (no live server needed):
-- k6/wrk load benchmarking (extend `benchmark.sh` to concurrency/saturation; meaningful thresholds still need a live box under load)
-- honeypot/tarpit + bad-bot blocker via `.htaccess` (nginx-optimizer parity)
-- transaction wiring into `apply_optimizations` (interrupt-safety; backup/rollback already covers recovery)
-- multi-site `analyze`/optimize `TARGET_SITE` resolution; JSON escaping; `--netrc` for basic-auth (avoid creds in `ps`)
+## v0.8 — offline roadmap cleared (shipped)
+- [x] **JSON escaping** (`json_escape`, PR #24) — all JSON string fields escaped; no more invalid JSON from a quote/backslash/newline in a path or header.
+- [x] **Basic-auth off the argv** (PR #25) — `LSO_HTTP_AUTH` passed via a mode-600 curl `--config` file, not `--user` on the command line (was visible in `ps`).
+- [x] **Multi-site `TARGET_SITE` resolution** (PR #27) — shared `_resolve_target_docroot` (exact-path / URL-host / parent-dir / unique-basename, all anchored); replaced the loose substring vhost match in the lscwp/woocommerce apply loops (could hit a `*-staging` sibling).
+- [x] **Bad-bot / scraper UA blocker** (PR #28, nginx-optimizer parity) — opt-in `--badbots` `.htaccess` UA denylist (`mod_setenvif` + dual 2.4/2.2 authz), conservative list excluding major search engines; scored in both analyzers (local marker + remote 403 probe).
+- [x] **k6/wrk/ab load benchmarking** (PR #29) — `benchmark --load` with tool detection and a portable parallel-curl fallback; `--concurrency`/`--duration`; JSON with concurrency fields. (Meaningful saturation thresholds still need a live box under load.)
+- [x] **Transaction wiring into `apply_optimizations`** (PR #30) — server-config edits are staged and committed all-or-nothing; rollback scoped to config-write failures (incl. swallowed ones via a write-error counter); the EXIT-trap rollback is now live. Read-your-writes keeps feature self-verification guards working.
 
+## v0.3+ — remaining
 Needs a live LiteSpeed server and/or an external account (not verifiable offline):
 - ModSecurity/OWASP CRS install, reCAPTCHA config, QUIC.cloud onboarding
 - DirectAdmin/RunCloud server-config write paths; fail2ban
