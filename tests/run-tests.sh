@@ -3389,13 +3389,46 @@ woo_snap=$(
     # shellcheck source=/dev/null
     source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
     http_status() { echo 200; }
-    snapshot_baseline "http://shop/" "http://shop/"
-    echo "n=${#LSO_BASELINE_WOO_URLS[@]} first=${LSO_BASELINE_WOO_URLS[0]:-}"
+    snapshot_baseline "http://shop/" "http://shop/kasse/cart/ http://shop/kasse/ http://shop/wp-json/wc/store/v1/products"
+    echo "n=${#LSO_BASELINE_WOO_URLS[@]} first=${LSO_BASELINE_WOO_URLS[0]:-} second=${LSO_BASELINE_WOO_URLS[1]:-}"
 )
-if echo "$woo_snap" | grep -q "n=3 first=http://shop/cart/"; then
-    log_pass "woo gate: snapshot_baseline records cart/checkout/Store-API when site is Woo"
+# Caller passes resolved permalinks (custom slug /kasse/) — gate records them verbatim.
+if echo "$woo_snap" | grep -q "n=3 first=http://shop/kasse/cart/ second=http://shop/kasse/"; then
+    log_pass "woo gate: snapshot_baseline records the caller-resolved Woo URLs (custom slug)"
 else
     log_fail "woo gate: snapshot Woo baseline wrong: ${woo_snap}"
+fi
+# 200 -> 500 (server error on a Woo flow) also fails the gate.
+woo_500=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }; sleep() { :; }
+    http_status() { case "$1" in *"/checkout/") echo 500 ;; *) echo 200 ;; esac; }
+    LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
+    LSO_BASELINE_WOO_URLS=("http://shop/checkout/"); LSO_BASELINE_WOO_STATUS=(200)
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$woo_500" | grep -q "RC:1"; then
+    log_pass "woo gate: 200->500 on a Woo flow fails the gate"
+else
+    log_fail "woo gate: 500 regression not caught: ${woo_500}"
+fi
+# A Woo flow unreachable at baseline (000) contributes no signal (skip, no false fail).
+woo_000=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
+    server_process_running() { return 0; }; sleep() { :; }
+    http_status() { echo 403; }   # would fail if gated, but baseline was 000
+    LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
+    LSO_BASELINE_WOO_URLS=("http://shop/checkout/"); LSO_BASELINE_WOO_STATUS=(000)
+    health_check && echo "RC:0" || echo "RC:1"
+)
+if echo "$woo_000" | grep -q "RC:0"; then
+    log_pass "woo gate: baseline-000 Woo flow contributes no signal (no false fail)"
+else
+    log_fail "woo gate: baseline-000 wrongly gated: ${woo_000}"
 fi
 woo_nosnap=$(
     log_info() { :; }; log_warn() { :; }; log_success() { :; }

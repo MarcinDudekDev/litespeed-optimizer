@@ -43,13 +43,14 @@ http_status() {
     curl -s -o /dev/null -m 10 -w '%{http_code}' "$url" 2>/dev/null || echo "000"
 }
 
-# snapshot_baseline [vhost_url] [woo_base_url]
-# Record the pre-change HTTP status used as the health reference. When
-# woo_base_url is given (the site runs WooCommerce), also baseline the
-# cart/checkout/Store-API flows so the post-restart gate can catch a checkout
-# that a later change (ModSec enforce, CAPTCHA) starts 403'ing.
+# snapshot_baseline [vhost_url] [woo_urls]
+# Record the pre-change HTTP status used as the health reference. woo_urls is a
+# space-separated list of full WooCommerce flow URLs (resolved by the caller via
+# WooCommerce's own permalink helpers, so custom slugs like /kasse/ are handled);
+# baselining them lets the post-restart gate catch a checkout that a later change
+# (ModSec enforce, CAPTCHA) starts 403'ing.
 snapshot_baseline() {
-    local vhost_url="${1:-}" woo_base="${2:-}"
+    local vhost_url="${1:-}" woo_urls="${2:-}"
     LSO_BASELINE_STATUS=$(http_status "$LSO_BASELINE_URL")
     log_info "Baseline: ${LSO_BASELINE_URL} -> HTTP ${LSO_BASELINE_STATUS}"
     if [ -n "$vhost_url" ]; then
@@ -59,12 +60,10 @@ snapshot_baseline() {
     fi
     LSO_BASELINE_WOO_URLS=()
     LSO_BASELINE_WOO_STATUS=()
-    if [ -n "$woo_base" ]; then
-        local b="${woo_base%/}" u s
-        # GET-only, anonymous, idempotent probes (no add-to-cart POST — that would
-        # mutate cart state on every optimize). cart + checkout + Store API catch
-        # the 403-on-checkout/REST regressions ModSec/CAPTCHA can introduce.
-        for u in "${b}/cart/" "${b}/checkout/" "${b}/wp-json/wc/store/v1/products"; do
+    if [ -n "$woo_urls" ]; then
+        local u s
+        # shellcheck disable=SC2086  # intentional split of the space-separated list
+        for u in $woo_urls; do
             s=$(http_status "$u")
             LSO_BASELINE_WOO_URLS+=("$u")
             LSO_BASELINE_WOO_STATUS+=("$s")
@@ -148,7 +147,7 @@ health_check() {
             if _health_url_ok "$LSO_BASELINE_URL" "$LSO_BASELINE_STATUS" &&
                _health_url_ok "$LSO_BASELINE_VHOST_URL" "$LSO_BASELINE_VHOST_STATUS" &&
                _health_woo_all_ok; then
-                log_success "Health check passed (process running; baselined URLs + Woo flows same-or-better)"
+                log_success "Health check passed (process running; baselined URLs same-or-better; Woo flows still 2xx/3xx)"
                 return 0
             fi
         else
