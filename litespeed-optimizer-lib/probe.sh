@@ -171,8 +171,7 @@ _probe_fetch_json() {
     # Probe output goes to a NON-docroot temp (never momentarily web-accessible).
     bodyfile=$(secure_mktemp "${LSO_DATA_DIR:-${TMPDIR:-/tmp}}/.lso-probe.XXXXXX" 2>/dev/null) \
         || bodyfile="${TMPDIR:-/tmp}/.lso-probe.$$"
-    auth_args=""
-    [ -n "${LSO_HTTP_AUTH:-}" ] && auth_args="--user ${LSO_HTTP_AUTH}"
+    auth_args=$(_lso_auth_args)
     # shellcheck disable=SC2086
     _PROBE_HTTP=$(curl -sL -m 15 $auth_args -o "$bodyfile" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
     _PROBE_BODY=$(cat "$bodyfile" 2>/dev/null || true)

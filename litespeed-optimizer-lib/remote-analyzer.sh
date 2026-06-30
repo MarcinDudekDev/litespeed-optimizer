@@ -44,8 +44,8 @@ _rm_request() {
 
     local jar_args=""
     [ -n "$jar" ] && jar_args="-c $jar -b $jar"
-    local auth_args=""
-    [ -n "${LSO_HTTP_AUTH:-}" ] && auth_args="--user ${LSO_HTTP_AUTH}"
+    local auth_args
+    auth_args=$(_lso_auth_args)
 
     # shellcheck disable=SC2086
     curl -sL -m 15 -A "$LSO_REMOTE_UA" $jar_args $auth_args "$@" \
@@ -80,8 +80,8 @@ _rm_ttfb() {
     [ "$_RM_REQ_COUNT" -ge "$cap" ] && return 1
     sleep "${LSO_REMOTE_DELAY:-1}"
     _RM_REQ_COUNT=$((_RM_REQ_COUNT + 1))
-    local auth_args=""
-    [ -n "${LSO_HTTP_AUTH:-}" ] && auth_args="--user ${LSO_HTTP_AUTH}"
+    local auth_args
+    auth_args=$(_lso_auth_args)
     # shellcheck disable=SC2086
     { curl -s -o /dev/null -m 15 -A "$LSO_REMOTE_UA" $auth_args \
         -w '%{time_starttransfer}' "$url" 2>/dev/null || true; } | \
