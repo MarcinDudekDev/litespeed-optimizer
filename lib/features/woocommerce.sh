@@ -108,10 +108,17 @@ feature_apply_custom_woocommerce() {
     fi
 
     local docroot rc=0
-    for docroot in "${LSO_WP_SITES[@]}"; do
-        if [ -n "$target_site" ] && [[ "$docroot" != *"$target_site"* ]]; then
-            continue
+    # Explicit target -> the ONE matching vhost (exact-path or URL-host), never a
+    # loose substring that could hit a *-staging sibling. No target -> all sites.
+    if [ -n "$target_site" ]; then
+        if docroot=$(_resolve_target_docroot "$target_site"); then
+            _woo_apply_site "$docroot" || rc=1
+        else
+            log_warn "WooCommerce: target '${target_site}' matched no detected WordPress site — skipping"
         fi
+        return $rc
+    fi
+    for docroot in "${LSO_WP_SITES[@]}"; do
         _woo_apply_site "$docroot" || rc=1
     done
     return $rc
@@ -121,7 +128,8 @@ feature_detect_custom_woocommerce() {
     _lscwp_have_wpcli || return 1
     [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ] || return 1
 
-    local docroot="${LSO_WP_SITES[0]}"
+    local docroot
+    docroot=$(_resolve_target_docroot "${TARGET_SITE:-}") || docroot="${LSO_WP_SITES[0]}"
     _woo_site_has_woo "$docroot" || return 1
     local crawler
     crawler=$(lso_wp "$docroot" litespeed-option get crawler 2>/dev/null) || return 1

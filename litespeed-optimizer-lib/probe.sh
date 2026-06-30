@@ -70,6 +70,101 @@ _probe_docroot() {
     return 0
 }
 
+# Resolve a single WP docroot from a TARGET_SITE that may be a DIRECTORY PATH or
+# a URL, for the commands that act on ONE site (analyze, the lscwp/woocommerce
+# apply loops). This replaces two earlier hardcodes/bugs:
+#   - detect/analyze blindly used "${LSO_WP_SITES[0]}", ignoring TARGET_SITE;
+#   - the apply loops used a loose substring guard
+#       [[ "$docroot" != *"$target_site"* ]]
+#     which matches the WRONG vhost on a multi-site box (e.g. target
+#     "/home/shop" also matches "/home/shop-staging").
+# Resolution order (first hit wins). Every match rule is EXACT, HOST-anchored, or
+# UNIQUE so none can resurrect the substring bug (target "shop" / "/home/shop"
+# must never select the "/home/shop-staging" sibling):
+#   1. empty target              -> first detected site (preserves no-arg)
+#   2. exact docroot path         -> that site (trailing slash normalised)
+#   3. URL host == site home host  -> that site (needs wp-cli; multi-vhost safe)
+#   4. parent dir of exactly ONE docroot -> that site (trailing-slash anchored,
+#      so "/home/shop" cannot swallow "/home/shop-staging"). Env/programmatic
+#      only — the CLI rejects '/' in a target.
+#   5. basename == exactly ONE docroot basename -> that site. Restores the CLI
+#      slug form `optimize shop` (`shop` -> /home/shop, NOT /home/shop-staging).
+#   6. non-empty target, no match -> echo nothing, return 1 (caller decides:
+#      analyze/detect warn + fall back to [0]; apply warns + skips so it can
+#      never touch the wrong vhost).
+# Echoes the resolved docroot on a match (or [0] for the empty case).
+_resolve_target_docroot() {
+    local target="${1:-}"
+    [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ] || return 1
+
+    # 1. No explicit target -> first site (back-compat: no-arg analyze/apply-all).
+    if [ -z "$target" ]; then
+        printf '%s' "${LSO_WP_SITES[0]}"
+        return 0
+    fi
+
+    local d want="${target%/}"
+    # 2. Exact docroot path match. Trailing slash normalised on both sides so
+    #    "/home/shop/" and "/home/shop" resolve the same site.
+    for d in "${LSO_WP_SITES[@]}"; do
+        if [ "${d%/}" = "$want" ]; then
+            printf '%s' "$d"
+            return 0
+        fi
+    done
+
+    # 3. URL target -> match by the site's own `home` host (reuse the probe
+    #    host-matching). A bare path/slug yields an empty host here, so this
+    #    branch only fires for real URLs.
+    local want_host
+    want_host=$(_probe_url_host "$target")
+    if [ -n "$want_host" ] && type -t lso_wp &>/dev/null \
+       && type -t _lscwp_have_wpcli &>/dev/null && _lscwp_have_wpcli; then
+        local h
+        for d in "${LSO_WP_SITES[@]}"; do
+            h=$(_probe_url_host "$(lso_wp "$d" option get home 2>/dev/null | tr -d '\r')")
+            if [ -n "$h" ] && [ "$h" = "$want_host" ]; then
+                printf '%s' "$d"
+                return 0
+            fi
+        done
+    fi
+
+    # 4. Parent-dir containment (absolute-path targets only). Anchored with a
+    #    trailing slash: a docroot matches only when it lives UNDER "$want/", so
+    #    "/home/shop" matches "/home/shop/public_html" but never the sibling
+    #    "/home/shop-staging". Require exactly one match to stay unambiguous.
+    if [ "${want#/}" != "$want" ]; then
+        local cmatch="" cn=0
+        for d in "${LSO_WP_SITES[@]}"; do
+            if [[ "${d%/}/" == "${want}/"* ]]; then
+                cmatch="$d"; cn=$((cn + 1))
+            fi
+        done
+        if [ "$cn" -eq 1 ]; then
+            printf '%s' "$cmatch"
+            return 0
+        fi
+    fi
+
+    # 5. Basename match (the CLI slug form). Exact basename equality, unique only
+    #    — "shop" matches /home/shop, not /home/shop-staging (basename differs).
+    local base bmatch="" bn=0
+    for d in "${LSO_WP_SITES[@]}"; do
+        base=$(basename "${d%/}")
+        if [ "$base" = "$want" ]; then
+            bmatch="$d"; bn=$((bn + 1))
+        fi
+    done
+    if [ "$bn" -eq 1 ]; then
+        printf '%s' "$bmatch"
+        return 0
+    fi
+
+    # 6. Non-empty target that matched nothing: signal failure (no echo).
+    return 1
+}
+
 # Resolve the base URL the probe is fetched from. Arg $1 = docroot (for wp-cli).
 _probe_base_url() {
     if _probe_target_url; then
