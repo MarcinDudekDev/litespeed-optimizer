@@ -98,6 +98,21 @@ apply_optimizations() {
 
     local applied=0 failed=0 skipped=0
     local fid
+
+    # Atomic config edits: stage every confedit (ols_set/ols_set_env) write to a
+    # per-file temp and commit them all at once only if EVERY feature succeeds.
+    # A mid-run feature failure rolls the staged config edits back, so a broken
+    # half-applied server config can never reach disk (the EXIT trap also rolls
+    # back on an abort/crash). NOTE: this covers the main server config only —
+    # wp-cli (LSCWP/Woo) and per-site .htaccess writes are not transactional, so
+    # side effects from features that already ran are not undone. Skipped under
+    # DRY_RUN (no real writes) and when the engine isn't loaded (subset tests).
+    local _txn_active=false
+    if [ "${DRY_RUN:-false}" != true ] && type -t transaction_start >/dev/null 2>&1; then
+        transaction_start
+        _txn_active=true
+    fi
+
     for fid in $features; do
         if [ -n "$exclude_id" ] && [ "$fid" = "$exclude_id" ]; then
             log_info "Skipping (excluded): $fid"
@@ -135,8 +150,27 @@ apply_optimizations() {
         else
             failed=$((failed + 1))
             log_error "$display FAILED"
+            # Atomic optimize: abort the run and discard ALL staged config edits
+            # so the live server config is left exactly as it was found.
+            if [ "$_txn_active" = true ]; then
+                log_error "Rolling back staged config edits (atomic optimize) — server config left unchanged."
+                transaction_rollback
+                _txn_active=false
+                break
+            fi
         fi
     done
+
+    # Commit the staged config edits onto the live files — but ONLY when every
+    # feature succeeded. (On failure we already rolled back and broke above.)
+    if [ "$_txn_active" = true ]; then
+        if [ "$failed" -eq 0 ]; then
+            transaction_commit
+        else
+            transaction_rollback
+        fi
+        _txn_active=false
+    fi
 
     echo ""
     if [ "${DRY_RUN:-false}" = true ]; then

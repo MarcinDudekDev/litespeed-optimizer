@@ -286,6 +286,21 @@ transaction_stage() {
         return 1
     fi
 
+    # Dedup by path: if this file is already staged (an earlier feature edited it
+    # in this same run), reuse its existing temp so successive edits accumulate
+    # onto the staged copy — NOT a fresh copy of the untouched original (which
+    # would discard the earlier edits on commit).
+    if [ "${#TRANSACTION_FILES[@]}" -gt 0 ]; then
+        local j
+        for ((j=0; j<${#TRANSACTION_FILES[@]}; j++)); do
+            if [ "${TRANSACTION_FILES[$j]}" = "$original_path" ]; then
+                # shellcheck disable=SC2034  # Consumed by callers after transaction_stage
+                TXN_TEMP_FILE="${TRANSACTION_TEMPS[$j]}"
+                return 0
+            fi
+        done
+    fi
+
     local target_dir
     target_dir=$(dirname "$original_path")
     local temp_file

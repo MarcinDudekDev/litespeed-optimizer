@@ -680,6 +680,109 @@ else
     log_fail "$leftover temp files left behind"
 fi
 
+# --- Read-your-writes: ols_get inside a live transaction sees STAGED edits, and
+# the live file stays untouched until commit (the property lscache's safety guard
+# relies on). ---
+TXN_RYW="${TEST_TMP}/txn-ryw"
+mkdir -p "$TXN_RYW"
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_RYW/httpd.conf"
+ryw=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    transaction_start
+    ols_set "$TXN_RYW/httpd.conf" tuning maxConnections 9999
+    # live file still pristine, staged value visible via ols_get
+    live=$(grep -cE "maxConnections[[:space:]]+100" "$TXN_RYW/httpd.conf")
+    staged=$(ols_get "$TXN_RYW/httpd.conf" tuning maxConnections)
+    transaction_commit
+    committed=$(ols_get "$TXN_RYW/httpd.conf" tuning maxConnections)
+    echo "live=${live} staged=${staged} committed=${committed}"
+)
+if [ "$ryw" = "live=1 staged=9999 committed=9999" ]; then
+    log_pass "txn: read-your-writes (staged value visible, live untouched until commit)"
+else
+    log_fail "txn read-your-writes wrong: [$ryw]"
+fi
+
+# --- Integration: apply_optimizations is all-or-nothing on the server config.
+# Drive the REAL apply_optimizations with two stub features — the first stages a
+# config edit, the second fails. The staged edit must roll back so the live
+# config is unchanged and no temps survive. ---
+TXN_INT="${TEST_TMP}/txn-int"
+mkdir -p "$TXN_INT"
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_INT/httpd.conf"
+(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
+    LSO_EDITION=ols LSO_PANEL=none LSO_LSWS_ROOT=/x
+    TXN_CONF="$TXN_INT/httpd.conf"
+    resolve_profile_features() { echo "feat_ok feat_bad"; }
+    feature_get_by_alias() { echo "$1"; }
+    feature_exists() { return 0; }
+    feature_get() { echo "$1"; }
+    feature_apply() {
+        if [ "$1" = "feat_ok" ]; then ols_set "$TXN_CONF" tuning maxConnections 9999; return 0; fi
+        return 1
+    }
+    apply_optimizations "" "" "" auto >/dev/null 2>&1 || true
+)
+if grep -qE "maxConnections[[:space:]]+100" "$TXN_INT/httpd.conf" \
+   && ! grep -qE "maxConnections[[:space:]]+9999" "$TXN_INT/httpd.conf"; then
+    log_pass "txn integration: mid-loop failure rolls back staged config (all-or-nothing)"
+else
+    log_fail "txn integration: config changed despite failure: $(cat "$TXN_INT/httpd.conf")"
+fi
+if [ "$(find "$TXN_INT" \( -name '.lso-txn.*' -o -name '.lso-confedit.*' \) | wc -l | tr -d ' ')" = "0" ]; then
+    log_pass "txn integration: no temps survive a rolled-back run"
+else
+    log_fail "txn integration: temp files left after rollback"
+fi
+
+# --- Integration: success path commits ALL features' edits onto the live file
+# (two features editing the SAME file -> staging dedups onto one temp), no temps. ---
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_INT/httpd.conf"
+(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
+    LSO_EDITION=ols LSO_PANEL=none LSO_LSWS_ROOT=/x
+    TXN_CONF="$TXN_INT/httpd.conf"
+    resolve_profile_features() { echo "feat_one feat_two"; }
+    feature_get_by_alias() { echo "$1"; }
+    feature_exists() { return 0; }
+    feature_get() { echo "$1"; }
+    feature_apply() {
+        if [ "$1" = "feat_one" ]; then ols_set "$TXN_CONF" tuning maxConnections 9999; return 0; fi
+        ols_set "$TXN_CONF" tuning enableBr 1; return 0
+    }
+    apply_optimizations "" "" "" auto >/dev/null 2>&1 || true
+)
+if grep -qE "maxConnections[[:space:]]+9999" "$TXN_INT/httpd.conf" \
+   && grep -qE "enableBr[[:space:]]+1" "$TXN_INT/httpd.conf"; then
+    log_pass "txn integration: success commits all features' edits (same-file dedup)"
+else
+    log_fail "txn integration: edits missing after commit: $(cat "$TXN_INT/httpd.conf")"
+fi
+if [ "$(find "$TXN_INT" \( -name '.lso-txn.*' -o -name '.lso-confedit.*' \) | wc -l | tr -d ' ')" = "0" ]; then
+    log_pass "txn integration: no temps survive a committed run"
+else
+    log_fail "txn integration: temp files left after commit"
+fi
+
 ################################################################################
 # SECTION 9b: json_escape helper
 ################################################################################

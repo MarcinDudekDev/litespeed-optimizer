@@ -13,6 +13,26 @@
 # untouched lines.
 ################################################################################
 
+# Resolve which path to READ for <file> under a transaction: the staged temp if
+# this file already has pending (uncommitted) edits, else the live file. This
+# gives read-your-writes consistency — a feature that re-reads a value it just
+# wrote (e.g. lscache's enableCache safety guard) sees the staged value, not the
+# stale live one. Read-only: never stages, only inspects the arrays, so it is
+# safe to call from inside $(...) (the subshell inherits the arrays).
+_confedit_read_src() {
+    local file="$1"
+    if [ "${TRANSACTION_ACTIVE:-false}" = true ] && [ "${#TRANSACTION_FILES[@]}" -gt 0 ]; then
+        local k
+        for ((k=0; k<${#TRANSACTION_FILES[@]}; k++)); do
+            if [ "${TRANSACTION_FILES[$k]}" = "$file" ]; then
+                printf '%s' "${TRANSACTION_TEMPS[$k]}"
+                return 0
+            fi
+        done
+    fi
+    printf '%s' "$file"
+}
+
 # ols_get <file> <block> <key>
 # Print the value of <key> inside top-level block <block> (first match).
 # For the special block "server" the key is looked up at top level (outside
@@ -20,6 +40,8 @@
 ols_get() {
     local file="$1" block="$2" key="$3"
     [ -f "$file" ] || return 1
+    local rfile
+    rfile=$(_confedit_read_src "$file")
 
     local value
     if [ "$block" = "server" ]; then
@@ -29,7 +51,7 @@ ols_get() {
             /\{[[:space:]]*$/ { depth++; next }
             /^[[:space:]]*\}/ { if (depth > 0) depth--; next }
             depth == 0 && $1 == key { $1 = ""; sub(/^[[:space:]]+/, ""); print; exit }
-        ' "$file")
+        ' "$rfile")
     else
         value=$(awk -v block="$block" -v key="$key" '
             { sub(/\r$/, "") }
@@ -53,11 +75,31 @@ ols_get() {
             inblock && depth == 1 && $1 == key {
                 $1 = ""; sub(/^[[:space:]]+/, ""); print; exit
             }
-        ' "$file")
+        ' "$rfile")
     fi
 
     [ -n "$value" ] || return 1
     echo "$value"
+}
+
+# When a transaction is active, route confedit writes through the staged temp
+# (edit-in-place, commit later) instead of writing the live file directly; when
+# inactive, read+write the live file (legacy immediate-write, byte-for-byte
+# unchanged). Sets the caller's _CE_SRC (awk input) + _CE_DEST (final mv target)
+# via bash dynamic scoping — the caller must `local _CE_SRC _CE_DEST` first.
+# Returns 1 if staging fails. MUST be called statement-level (transaction_stage
+# mutates module arrays — never inside $(...)).
+_confedit_route() {
+    local file="$1"
+    if [ "${TRANSACTION_ACTIVE:-false}" = true ] && type -t transaction_stage >/dev/null 2>&1; then
+        transaction_stage "$file" || return 1
+        _CE_SRC="$TXN_TEMP_FILE"
+        _CE_DEST="$TXN_TEMP_FILE"
+    else
+        _CE_SRC="$file"
+        _CE_DEST="$file"
+    fi
+    return 0
 }
 
 # ols_set <file> <block> <key> <value>
@@ -70,8 +112,11 @@ ols_set() {
     local file="$1" block="$2" key="$3" value="$4"
     [ -f "$file" ] || return 1
 
+    local _CE_SRC _CE_DEST
+    _confedit_route "$file" || return 1
+
     local tmp
-    tmp=$(secure_mktemp "$(dirname "$file")/.lso-confedit.XXXXXX") || return 1
+    tmp=$(secure_mktemp "$(dirname "$_CE_DEST")/.lso-confedit.XXXXXX") || return 1
 
     awk -v block="$block" -v key="$key" -v value="$value" '
         BEGIN { done = 0; inblock = 0; depth = 0 }
@@ -125,11 +170,11 @@ ols_set() {
                 print "}"
             }
         }
-    ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+    ' "$_CE_SRC" > "$tmp" || { rm -f "$tmp"; return 1; }
 
-    copy_file_permissions "$file" "$tmp" 2>/dev/null || true
-    copy_file_ownership "$file" "$tmp" 2>/dev/null || true
-    mv "$tmp" "$file"
+    copy_file_permissions "$_CE_SRC" "$tmp" 2>/dev/null || true
+    copy_file_ownership "$_CE_SRC" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$_CE_DEST"
 }
 
 # ols_ensure_include <file> <include-path>
@@ -232,6 +277,8 @@ ols_lint() {
 # (extprocessor blocks carry many env lines, so plain ols_get cannot address them).
 ols_get_env() {
     local file="$1" block="$2" var="$3"
+    local rfile
+    rfile=$(_confedit_read_src "$file")
     local line
     line=$(awk -v block="$block" -v var="$var" '
         { sub(/\r$/, "") }
@@ -258,7 +305,7 @@ ols_get_env() {
                 exit
             }
         }
-    ' "$file")
+    ' "$rfile")
 
     [ -n "$line" ] || return 1
     echo "$line"
@@ -271,8 +318,11 @@ ols_set_env() {
     local file="$1" block="$2" var="$3" value="$4"
     [ -f "$file" ] || return 1
 
+    local _CE_SRC _CE_DEST
+    _confedit_route "$file" || return 1
+
     local tmp
-    tmp=$(secure_mktemp "$(dirname "$file")/.lso-confedit.XXXXXX") || return 1
+    tmp=$(secure_mktemp "$(dirname "$_CE_DEST")/.lso-confedit.XXXXXX") || return 1
 
     awk -v block="$block" -v var="$var" -v value="$value" '
         BEGIN { done = 0; inblock = 0; depth = 0 }
@@ -327,11 +377,11 @@ ols_set_env() {
                 print "}"
             }
         }
-    ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+    ' "$_CE_SRC" > "$tmp" || { rm -f "$tmp"; return 1; }
 
-    copy_file_permissions "$file" "$tmp" 2>/dev/null || true
-    copy_file_ownership "$file" "$tmp" 2>/dev/null || true
-    mv "$tmp" "$file"
+    copy_file_permissions "$_CE_SRC" "$tmp" 2>/dev/null || true
+    copy_file_ownership "$_CE_SRC" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$_CE_DEST"
 }
 
 ################################################################################
