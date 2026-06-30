@@ -1820,6 +1820,76 @@ else
     log_fail "security: headers block disturbed by badbots apply"
 fi
 
+# --trusted-ip: allowlisted IPs bypass the bad-bot deny (RequireAny ip for 2.4,
+# Order Deny,Allow + Allow from for 2.2). Comma list accepted.
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --badbots --trusted-ip "203.0.113.5,198.51.100.0/24" --force >/dev/null 2>&1 || true
+if grep -q "Require ip 203.0.113.5 198.51.100.0/24" "$SEC_HT" 2>/dev/null \
+    && grep -q "<RequireAny>" "$SEC_HT" 2>/dev/null \
+    && grep -q "Allow from 203.0.113.5 198.51.100.0/24" "$SEC_HT" 2>/dev/null \
+    && grep -q "Order Deny,Allow" "$SEC_HT" 2>/dev/null; then
+    log_pass "security: --trusted-ip exempts allowlisted IPs from the bad-bot block (dual authz)"
+else
+    log_fail "security: --trusted-ip exemption missing/malformed: $(grep -A2 RequireAny "$SEC_HT" 2>/dev/null)"
+fi
+# Still idempotent with trusted IPs (single block).
+if [ "$(grep -c "# BEGIN litespeed-optimizer badbots" "$SEC_HT" 2>/dev/null)" = "1" ]; then
+    log_pass "security: badbots block idempotent with --trusted-ip"
+else
+    log_fail "security: badbots block duplicated with --trusted-ip"
+fi
+# Invalid --trusted-ip is rejected at parse time (no shell metacharacters reach .htaccess).
+ti_bad_rc=0
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" \
+    "${OPTIMIZER}" optimize --feature security --badbots --trusted-ip "evil; rm -rf /" --dry-run >/dev/null 2>&1 || ti_bad_rc=$?
+if [ "$ti_bad_rc" -ne 0 ]; then
+    log_pass "security: --trusted-ip rejects an invalid/metachar value (exit ${ti_bad_rc})"
+else
+    log_fail "security: --trusted-ip accepted an invalid value"
+fi
+# A valid IPv6 + CIDR passes validation (dry-run, no write needed).
+ti_ok_rc=0
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_WP_BIN=/nonexistent LSO_SKIP_RESTART=1 \
+    LSO_RAM_MB=4096 LSO_CORES=4 LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" \
+    "${OPTIMIZER}" optimize --feature security --trusted-ip "2001:db8::1 10.0.0.0/8" --dry-run >/dev/null 2>&1 || ti_ok_rc=$?
+if [ "$ti_ok_rc" -eq 0 ]; then
+    log_pass "security: --trusted-ip accepts IPv6 + CIDR"
+else
+    log_fail "security: --trusted-ip wrongly rejected a valid IPv6/CIDR (exit ${ti_ok_rc})"
+fi
+# An out-of-range CIDR prefix and an empty token-list are rejected.
+ti_cidr_rc=0
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" \
+    "${OPTIMIZER}" optimize --feature security --trusted-ip "10.0.0.0/999" --dry-run >/dev/null 2>&1 || ti_cidr_rc=$?
+ti_empty_rc=0
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" \
+    "${OPTIMIZER}" optimize --feature security --trusted-ip "," --dry-run >/dev/null 2>&1 || ti_empty_rc=$?
+if [ "$ti_cidr_rc" -ne 0 ] && [ "$ti_empty_rc" -ne 0 ]; then
+    log_pass "security: --trusted-ip rejects out-of-range CIDR and empty list"
+else
+    log_fail "security: --trusted-ip CIDR/empty handling wrong (cidr=${ti_cidr_rc} empty=${ti_empty_rc})"
+fi
+# Re-apply with --trusted-ip stays idempotent (single badbots block).
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --badbots --trusted-ip "203.0.113.5" --force >/dev/null 2>&1 || true
+if [ "$(grep -c "# BEGIN litespeed-optimizer badbots" "$SEC_HT" 2>/dev/null)" = "1" ]; then
+    log_pass "security: --trusted-ip re-apply is idempotent (single block)"
+else
+    log_fail "security: --trusted-ip re-apply duplicated the block"
+fi
+# Env var LSO_TRUSTED_IPS is honoured (not wiped by the global init).
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    LSO_TRUSTED_IPS="192.0.2.7" \
+    "${OPTIMIZER}" optimize --feature security --badbots --force >/dev/null 2>&1 || true
+if grep -q "Require ip 192.0.2.7" "$SEC_HT" 2>/dev/null; then
+    log_pass "security: LSO_TRUSTED_IPS env var honoured"
+else
+    log_fail "security: LSO_TRUSTED_IPS env var ignored"
+fi
+
 # Enterprise: WordPressProtect via include
 SEC_ENT_FIX="${TEST_TMP}/sec-ent-fix"
 SEC_ENT_DATA="${TEST_TMP}/sec-ent-data"

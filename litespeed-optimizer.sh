@@ -59,6 +59,12 @@ EXCLUDE_FEATURE=""
 PROFILE="auto"
 TARGET_SITE=""
 LOAD_MODE=false
+# Space-separated allowlist of trusted IPs/CIDRs (set by --trusted-ip, or via the
+# LSO_TRUSTED_IPS env var). Exempts these sources from the bad-bot blocker now,
+# and from fail2ban/throttling/CAPTCHA as those live features land. Read directly
+# as ${LSO_TRUSTED_IPS:-} by consumers. Honour a pre-set env value (don't clobber).
+# shellcheck disable=SC2034  # consumed by lib/features/security.sh (badbots) + future live features
+LSO_TRUSTED_IPS="${LSO_TRUSTED_IPS:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the 7 REGISTERED features (lib/features/*.sh); keep this list in
@@ -82,6 +88,23 @@ ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
 _validate_input_name() {
     local name="$1"
     [[ "$name" =~ ^[a-zA-Z0-9._-]+$ ]] && [[ "$name" != *".."* ]] && [[ "$name" != /* ]]
+}
+
+# Validate one IPv4/IPv6 address or CIDR (these get inserted into .htaccess and
+# config, so reject anything with shell/Apache metacharacters). Conservative: the
+# charset alone forbids spaces, quotes, semicolons, backticks, etc.
+_validate_ip() {
+    local ip="$1"
+    [ -n "$ip" ] || return 1
+    [[ "$ip" =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] || return 1
+    # Must contain a dot (IPv4) or a colon (IPv6) so a bare number can't pass.
+    [[ "$ip" == *.* || "$ip" == *:* ]] || return 1
+    # If a CIDR prefix is present, bound it (0-128 covers IPv4 /32 and IPv6 /128).
+    if [[ "$ip" == */* ]]; then
+        local prefix="${ip##*/}"
+        [ "$prefix" -ge 0 ] && [ "$prefix" -le 128 ] || return 1
+    fi
+    return 0
 }
 
 # Validate feature name against allowed list
@@ -323,6 +346,9 @@ OPTIONS:
                                 with import + verification steps (default: off)
     --badbots                   security: also deploy an opt-in bad-bot UA
                                 denylist to each site's .htaccess (default: off)
+    --trusted-ip <ip[,ip...]>   allowlist IPs/CIDRs exempt from the bad-bot
+                                blocker (and fail2ban/throttling as they land);
+                                comma- or space-separated, repeatable
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -364,6 +390,8 @@ ENVIRONMENT:
                                 --concurrency)
     LSO_LOAD_DURATION           benchmark --load duration in seconds (default 10;
                                 also --duration)
+    LSO_TRUSTED_IPS             space-separated allowlist exempt from the bad-bot
+                                blocker / fail2ban / throttling (also --trusted-ip)
     Backups stored in: ${BACKUP_DIR}
     Logs stored in: ${LOG_DIR}
 
@@ -792,6 +820,29 @@ parse_arguments() {
             --badbots)
                 export LSO_BADBOTS=1
                 shift
+                ;;
+            --trusted-ip)
+                if [ -z "${2:-}" ] || [[ "$2" == -* ]]; then
+                    log_error "--trusted-ip requires an IP/CIDR (comma- or space-separated; repeatable)"
+                    exit 1
+                fi
+                # Accept comma or whitespace separators; validate each; accumulate.
+                _ti_raw="${2//,/ }"
+                _ti_n=0
+                for _ti in $_ti_raw; do
+                    if ! _validate_ip "$_ti"; then
+                        log_error "--trusted-ip: invalid IP/CIDR: $_ti"
+                        exit 1
+                    fi
+                    LSO_TRUSTED_IPS="${LSO_TRUSTED_IPS:+$LSO_TRUSTED_IPS }${_ti}"
+                    _ti_n=$((_ti_n + 1))
+                done
+                if [ "$_ti_n" -eq 0 ]; then
+                    log_error "--trusted-ip: no valid IP/CIDR in '$2'"
+                    exit 1
+                fi
+                export LSO_TRUSTED_IPS
+                shift 2
                 ;;
             --load)
                 LOAD_MODE=true
