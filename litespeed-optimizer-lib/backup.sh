@@ -291,6 +291,12 @@ restore_backup_files() {
             case "$lscwp_docroot" in
                 ''|*..*) log_warn "Unsafe docroot in backup ($lscwp_docroot) — skipping LSCWP restore"; continue ;;
             esac
+            # Must be a real WordPress docroot (wp-config.php present) — defends
+            # against a sidecar pointing at an absolute non-WP path like /etc.
+            if [ ! -f "${lscwp_docroot%/}/wp-config.php" ]; then
+                log_warn "No wp-config.php under $lscwp_docroot — skipping LSCWP restore"
+                continue
+            fi
             if [ -d "$lscwp_docroot" ]; then
                 log_info "Restoring LSCWP options -> $lscwp_docroot"
                 lso_wp "$lscwp_docroot" litespeed-option import "$json" >/dev/null 2>&1 \

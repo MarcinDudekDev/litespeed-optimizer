@@ -588,6 +588,7 @@ fi
 # 5. LSCWP option rollback: restore_backup_files must `litespeed-option import`
 #    the pre-change export back into its recorded docroot (was never done).
 LSCWP_RB_DR="${TEST_TMP}/lscwp-rb-docroot"; mkdir -p "$LSCWP_RB_DR"
+: > "${LSCWP_RB_DR}/wp-config.php"   # restore requires a real WP docroot
 LSCWP_RB_BK="${TEST_TMP}/lscwp-rb-backup"; mkdir -p "${LSCWP_RB_BK}/lscwp"
 printf '{"opt":"old"}\n' > "${LSCWP_RB_BK}/lscwp/site.json"
 printf '%s\n' "$LSCWP_RB_DR" > "${LSCWP_RB_BK}/lscwp/site.docroot"
@@ -1342,6 +1343,26 @@ for kv in "dynReqPerSec 2" "staticReqPerSec 40" "softLimit 15" "hardLimit 20" "g
     fi
 done
 [ "$sec_ok" = true ] && log_pass "security: full perClientConnLimit throttling block applied"
+
+# Security headers deployed to the WP site .htaccess (makes `headers` alias real)
+SEC_HT="$SEC_FIX/home/example.com/public_html/.htaccess"
+if grep -q "# BEGIN litespeed-optimizer headers" "$SEC_HT" 2>/dev/null \
+    && grep -q 'X-Content-Type-Options "nosniff"' "$SEC_HT" 2>/dev/null \
+    && grep -q 'X-Frame-Options "SAMEORIGIN"' "$SEC_HT" 2>/dev/null \
+    && grep -q 'Referrer-Policy' "$SEC_HT" 2>/dev/null; then
+    log_pass "security: response headers deployed to site .htaccess (headers alias is truthful)"
+else
+    log_fail "security: headers block missing from .htaccess"
+fi
+# Idempotent: a second apply must not duplicate the block
+sec_out2=$(LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --force 2>&1 || true)
+if [ "$(grep -c "# BEGIN litespeed-optimizer headers" "$SEC_HT" 2>/dev/null)" = "1" ]; then
+    log_pass "security: headers block is idempotent (no duplication on re-apply)"
+else
+    log_fail "security: headers block duplicated on re-apply"
+fi
 if echo "$sec_out" | grep -qi "recaptcha"; then
     log_pass "security: reCAPTCHA report-only guidance printed"
 else
