@@ -24,6 +24,12 @@ LSO_BASELINE_URL="http://127.0.0.1/"
 # known) — catches a broken real vhost that the default 127.0.0.1 vhost hides.
 LSO_BASELINE_VHOST_URL=""
 LSO_BASELINE_VHOST_STATUS=""
+# Optional WooCommerce smoke-gate baselines (parallel arrays; set by
+# snapshot_baseline when the target site runs WooCommerce). These guard the
+# cart/checkout/Store-API flows that a homepage health check is blind to — a new
+# ModSec/CAPTCHA 403 on checkout returns 200 on the homepage but breaks orders.
+LSO_BASELINE_WOO_URLS=()
+LSO_BASELINE_WOO_STATUS=()
 # Why the last restart attempt failed (for accurate rollback messaging)
 LSO_RESTART_FAIL_REASON=""
 
@@ -37,16 +43,32 @@ http_status() {
     curl -s -o /dev/null -m 10 -w '%{http_code}' "$url" 2>/dev/null || echo "000"
 }
 
-# snapshot_baseline [vhost_url]
-# Record the pre-change HTTP status used as the health reference.
+# snapshot_baseline [vhost_url] [woo_urls]
+# Record the pre-change HTTP status used as the health reference. woo_urls is a
+# space-separated list of full WooCommerce flow URLs (resolved by the caller via
+# WooCommerce's own permalink helpers, so custom slugs like /kasse/ are handled);
+# baselining them lets the post-restart gate catch a checkout that a later change
+# (ModSec enforce, CAPTCHA) starts 403'ing.
 snapshot_baseline() {
-    local vhost_url="${1:-}"
+    local vhost_url="${1:-}" woo_urls="${2:-}"
     LSO_BASELINE_STATUS=$(http_status "$LSO_BASELINE_URL")
     log_info "Baseline: ${LSO_BASELINE_URL} -> HTTP ${LSO_BASELINE_STATUS}"
     if [ -n "$vhost_url" ]; then
         LSO_BASELINE_VHOST_URL="$vhost_url"
         LSO_BASELINE_VHOST_STATUS=$(http_status "$vhost_url")
         log_info "Baseline: ${vhost_url} -> HTTP ${LSO_BASELINE_VHOST_STATUS}"
+    fi
+    LSO_BASELINE_WOO_URLS=()
+    LSO_BASELINE_WOO_STATUS=()
+    if [ -n "$woo_urls" ]; then
+        local u s
+        # shellcheck disable=SC2086  # intentional split of the space-separated list
+        for u in $woo_urls; do
+            s=$(http_status "$u")
+            LSO_BASELINE_WOO_URLS+=("$u")
+            LSO_BASELINE_WOO_STATUS+=("$s")
+            log_info "Baseline (woo): ${u} -> HTTP ${s}"
+        done
     fi
 }
 
@@ -85,16 +107,47 @@ _health_url_ok() {
     return 1
 }
 
-# health_check — process up AND every baselined URL same-or-better. The real
-# vhost (when known) is checked too, so a broken vhost the default 127.0.0.1
-# vhost would mask still fails the gate. 3 retries x 5s.
+# _health_woo_url_ok <url> <baseline> — STRICTER than _health_url_ok: a Woo flow
+# that worked at baseline (2xx/3xx) must still answer 2xx/3xx. A NEW 4xx (a
+# ModSec/CAPTCHA 403 on checkout) is the exact failure the generic same-or-better
+# check misses (it treats any non-5xx as "ok"). Flows already broken/blocked at
+# baseline contribute no signal (we don't attribute a pre-existing 403 to us).
+_health_woo_url_ok() {
+    local url="$1" baseline="$2" status
+    case "$baseline" in 2??|3??) ;; *) return 0 ;; esac
+    status=$(http_status "$url")
+    case "$status" in
+        2??|3??)
+            log_success "Woo smoke: ${url} -> HTTP ${status} (baseline ${baseline})"
+            return 0 ;;
+        *)
+            log_warn "Woo smoke: ${url} -> HTTP ${status} (baseline ${baseline}) — checkout/cart/REST regression (ModSec/CAPTCHA 403?)"
+            return 1 ;;
+    esac
+}
+
+# _health_woo_all_ok — every baselined Woo flow still 2xx/3xx (no-op when none).
+_health_woo_all_ok() {
+    [ "${#LSO_BASELINE_WOO_URLS[@]}" -gt 0 ] || return 0
+    local i
+    for ((i=0; i<${#LSO_BASELINE_WOO_URLS[@]}; i++)); do
+        _health_woo_url_ok "${LSO_BASELINE_WOO_URLS[$i]}" "${LSO_BASELINE_WOO_STATUS[$i]}" || return 1
+    done
+    return 0
+}
+
+# health_check — process up AND every baselined URL same-or-better AND (on a Woo
+# site) cart/checkout/Store-API not newly 4xx/5xx. The real vhost (when known) is
+# checked too, so a broken vhost the default 127.0.0.1 vhost would mask still
+# fails the gate. 3 retries x 5s.
 health_check() {
     local attempt
     for attempt in 1 2 3; do
         if server_process_running; then
             if _health_url_ok "$LSO_BASELINE_URL" "$LSO_BASELINE_STATUS" &&
-               _health_url_ok "$LSO_BASELINE_VHOST_URL" "$LSO_BASELINE_VHOST_STATUS"; then
-                log_success "Health check passed (process running; baselined URLs same-or-better)"
+               _health_url_ok "$LSO_BASELINE_VHOST_URL" "$LSO_BASELINE_VHOST_STATUS" &&
+               _health_woo_all_ok; then
+                log_success "Health check passed (process running; baselined URLs same-or-better; Woo flows still 2xx/3xx)"
                 return 0
             fi
         else

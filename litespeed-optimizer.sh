@@ -576,10 +576,23 @@ cmd_optimize() {
         elif [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
             _vhost_site="${LSO_WP_SITES[0]}"
         fi
+        local _woo_urls="" _wc_cart="" _wc_co="" _wc_u
         if [ -n "$_vhost_site" ] && type -t lso_wp &>/dev/null; then
             _vhost_url=$(lso_wp "$_vhost_site" option get home 2>/dev/null | tr -d '\r') || _vhost_url=""
+            # If the site runs WooCommerce, baseline its cart/checkout/Store-API so
+            # the post-restart gate catches a checkout that a change starts 403'ing.
+            # Resolve the REAL cart/checkout permalinks via WC's own helpers so a
+            # custom slug (e.g. /kasse/) is gated, not a hardcoded /checkout/.
+            # GET-only, anonymous, idempotent.
+            if [ -n "$_vhost_url" ] && lso_wp "$_vhost_site" plugin is-active woocommerce >/dev/null 2>&1; then
+                _wc_cart=$(lso_wp "$_vhost_site" eval 'echo esc_url_raw(wc_get_cart_url());' 2>/dev/null | tr -d '\r')
+                _wc_co=$(lso_wp "$_vhost_site" eval 'echo esc_url_raw(wc_get_checkout_url());' 2>/dev/null | tr -d '\r')
+                for _wc_u in "$_wc_cart" "$_wc_co" "${_vhost_url%/}/wp-json/wc/store/v1/products"; do
+                    [ -n "$_wc_u" ] && _woo_urls="${_woo_urls:+$_woo_urls }${_wc_u}"
+                done
+            fi
         fi
-        snapshot_baseline "$_vhost_url"
+        snapshot_baseline "$_vhost_url" "$_woo_urls"
     fi
 
     # Create backup first (skip on dry-run)
