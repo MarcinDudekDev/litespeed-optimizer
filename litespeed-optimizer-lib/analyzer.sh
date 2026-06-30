@@ -107,6 +107,19 @@ run_analyze() {
 
     local v
 
+    # Resolve the WordPress docroot this audit targets ONCE. On a multi-site box
+    # honour TARGET_SITE (dir/URL/slug); warn a single time on an explicit miss
+    # (suppressed under --json so it can't corrupt the JSON stream); else [0].
+    local _az_docroot=""
+    if [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
+        if ! _az_docroot=$(_resolve_target_docroot "${TARGET_SITE:-}"); then
+            if [ -n "${TARGET_SITE:-}" ] && [ "${JSON_OUTPUT:-false}" != true ]; then
+                log_warn "analyze: target '${TARGET_SITE}' matched no detected WordPress site — auditing ${LSO_WP_SITES[0]}"
+            fi
+            _az_docroot="${LSO_WP_SITES[0]}"
+        fi
+    fi
+
     ############################################################
     # Server / protocol
     ############################################################
@@ -216,7 +229,8 @@ run_analyze() {
     if type -t _lscwp_have_wpcli &>/dev/null && _lscwp_have_wpcli && \
        [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
         local oc_json
-        oc_json=$(lso_wp "${LSO_WP_SITES[0]}" eval 'if(function_exists("opcache_get_status")){$s=opcache_get_status(false);echo json_encode(array("used"=>$s["memory_usage"]["used_memory"],"free"=>$s["memory_usage"]["free_memory"],"wasted"=>$s["memory_usage"]["wasted_memory"],"hits"=>$s["opcache_statistics"]["hits"],"misses"=>$s["opcache_statistics"]["misses"],"hit_rate"=>$s["opcache_statistics"]["opcache_hit_rate"],"interned_free"=>$s["interned_strings_usage"]["free_memory"],"keys"=>$s["opcache_statistics"]["num_cached_keys"],"max_keys"=>$s["opcache_statistics"]["max_cached_keys"]));}else{echo "{}";}' 2>/dev/null | tr -d '\r')
+        # Read runtime OPcache from the resolved TARGET_SITE's PHP (multi-site safe).
+        oc_json=$(lso_wp "${_az_docroot:-${LSO_WP_SITES[0]}}" eval 'if(function_exists("opcache_get_status")){$s=opcache_get_status(false);echo json_encode(array("used"=>$s["memory_usage"]["used_memory"],"free"=>$s["memory_usage"]["free_memory"],"wasted"=>$s["memory_usage"]["wasted_memory"],"hits"=>$s["opcache_statistics"]["hits"],"misses"=>$s["opcache_statistics"]["misses"],"hit_rate"=>$s["opcache_statistics"]["opcache_hit_rate"],"interned_free"=>$s["interned_strings_usage"]["free_memory"],"keys"=>$s["opcache_statistics"]["num_cached_keys"],"max_keys"=>$s["opcache_statistics"]["max_cached_keys"]));}else{echo "{}";}' 2>/dev/null | tr -d '\r')
 
         if [ -n "$oc_json" ] && [ "$oc_json" != "{}" ]; then
             local oc_used oc_free oc_hr oc_interned
@@ -349,7 +363,8 @@ run_analyze() {
     if type -t _lscwp_have_wpcli &>/dev/null && _lscwp_have_wpcli && \
        [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
         have_wp=true
-        docroot="${LSO_WP_SITES[0]}"
+        # Already resolved once at the top of run_analyze (honours TARGET_SITE).
+        docroot="${_az_docroot:-${LSO_WP_SITES[0]}}"
     fi
 
     if [ "$have_wp" = true ]; then

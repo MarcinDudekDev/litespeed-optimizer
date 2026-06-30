@@ -2297,6 +2297,141 @@ else
     log_fail "probe docroot: override picked '$probe_dr_override', expected /srv/explicit"
 fi
 
+log_section "TARGET_SITE Docroot Resolver (analyze + apply, multi-site)"
+
+# _resolve_target_docroot() backs analyze/detect and the lscwp/woocommerce apply
+# loops. The bug it replaces: a loose substring guard treated "/home/shop" as a
+# match for BOTH /home/shop and /home/shop-staging. Exact-path/host match fixes it.
+# Helper to run the resolver in an isolated, fully-stubbed subshell.
+_run_resolver() {
+    # $1 = TARGET_SITE arg; remaining env (LSO_WP_SITES, mocks) set by caller block
+    (
+        log_error() { echo "[ERROR] $*" >&2; }
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/core/helpers.sh"
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/litespeed-optimizer-lib/probe.sh"
+        LSO_WP_SITES=("/home/shop" "/home/shop-staging" "/home/blog")
+        _lscwp_have_wpcli() { return 0; }
+        lso_wp() {
+            if [ "$1" = "/home/shop" ]; then echo "https://shop.example.com"
+            elif [ "$1" = "/home/shop-staging" ]; then echo "https://staging.shop.example.com"
+            elif [ "$1" = "/home/blog" ]; then echo "https://blog.example.com"
+            fi
+        }
+        if _resolve_target_docroot "$1"; then :; else echo "__NOMATCH__"; fi
+    )
+}
+
+# 1. No target -> first site (no-arg back-compat).
+r=$(_run_resolver "")
+if [ "$r" = "/home/shop" ]; then
+    log_pass "resolver: empty target -> first site"
+else
+    log_fail "resolver: empty target -> '$r', expected /home/shop"
+fi
+
+# 2. Exact directory path -> that exact site (NOT the -staging sibling).
+r=$(_run_resolver "/home/shop")
+if [ "$r" = "/home/shop" ]; then
+    log_pass "resolver: exact path /home/shop -> /home/shop (staging not substring-matched)"
+else
+    log_fail "resolver: exact path picked '$r', expected /home/shop"
+fi
+
+# 3. Exact path to the staging sibling -> staging (proves no cross-match either way).
+r=$(_run_resolver "/home/shop-staging")
+if [ "$r" = "/home/shop-staging" ]; then
+    log_pass "resolver: exact path /home/shop-staging -> /home/shop-staging"
+else
+    log_fail "resolver: staging path picked '$r', expected /home/shop-staging"
+fi
+
+# 4. Trailing-slash directory target is normalised.
+r=$(_run_resolver "/home/shop/")
+if [ "$r" = "/home/shop" ]; then
+    log_pass "resolver: trailing-slash path normalised -> /home/shop"
+else
+    log_fail "resolver: trailing-slash picked '$r', expected /home/shop"
+fi
+
+# 5. URL target -> matched by site home host (www + path stripped).
+r=$(_run_resolver "https://www.staging.shop.example.com/wp-login.php")
+if [ "$r" = "/home/shop-staging" ]; then
+    log_pass "resolver: URL host -> serving vhost (/home/shop-staging)"
+else
+    log_fail "resolver: URL host picked '$r', expected /home/shop-staging"
+fi
+
+# 6. Non-empty target that matches nothing -> failure (caller falls back / skips).
+r=$(_run_resolver "/home/does-not-exist")
+if [ "$r" = "__NOMATCH__" ]; then
+    log_pass "resolver: unknown target -> returns failure (no wrong-vhost fallback)"
+else
+    log_fail "resolver: unknown target returned '$r', expected failure"
+fi
+
+# 7. CLI slug form `optimize shop` -> unique basename match (/home/shop), NOT the
+#    /home/shop-staging sibling (the old substring guard hit both).
+r=$(_run_resolver "shop")
+if [ "$r" = "/home/shop" ]; then
+    log_pass "resolver: slug 'shop' -> /home/shop (unique basename, staging excluded)"
+else
+    log_fail "resolver: slug 'shop' picked '$r', expected /home/shop"
+fi
+
+# 8. Parent-dir containment: an absolute path that is the parent of exactly one
+#    nested docroot resolves to it, trailing-slash anchored (no sibling swallow).
+r=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/probe.sh"
+    LSO_WP_SITES=("/home/shop/public_html" "/home/shop-staging/public_html")
+    _lscwp_have_wpcli() { return 1; }
+    if _resolve_target_docroot "/home/shop"; then :; else echo "__NOMATCH__"; fi
+)
+if [ "$r" = "/home/shop/public_html" ]; then
+    log_pass "resolver: parent path /home/shop -> nested docroot (sibling not swallowed)"
+else
+    log_fail "resolver: parent path picked '$r', expected /home/shop/public_html"
+fi
+
+# 9. Ambiguous basename (two sites share a basename) -> failure, not a guess.
+r=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/probe.sh"
+    LSO_WP_SITES=("/home/a/shop" "/home/b/shop")
+    _lscwp_have_wpcli() { return 1; }
+    if _resolve_target_docroot "shop"; then :; else echo "__NOMATCH__"; fi
+)
+if [ "$r" = "__NOMATCH__" ]; then
+    log_pass "resolver: ambiguous basename 'shop' (2 sites) -> failure (no guess)"
+else
+    log_fail "resolver: ambiguous basename returned '$r', expected failure"
+fi
+
+# 10. Ambiguous parent path (>=2 docroots nested under it) -> failure, not a guess.
+r=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/probe.sh"
+    LSO_WP_SITES=("/home/shop/a" "/home/shop/b")
+    _lscwp_have_wpcli() { return 1; }
+    if _resolve_target_docroot "/home/shop"; then :; else echo "__NOMATCH__"; fi
+)
+if [ "$r" = "__NOMATCH__" ]; then
+    log_pass "resolver: ambiguous parent '/home/shop' (2 nested) -> failure (no guess)"
+else
+    log_fail "resolver: ambiguous parent returned '$r', expected failure"
+fi
+
 ################################################################################
 # SECTION 22: probe-redis (web-SAPI redis-extension probe)
 ################################################################################

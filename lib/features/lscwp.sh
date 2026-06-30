@@ -416,10 +416,18 @@ feature_apply_custom_lscwp() {
     fi
 
     local docroot rc=0
-    for docroot in "${LSO_WP_SITES[@]}"; do
-        if [ -n "$target_site" ] && [[ "$docroot" != *"$target_site"* ]]; then
-            continue
+    # With an explicit target, resolve to the ONE matching vhost (exact-path or
+    # URL-host); never fall through the loose substring match that could hit a
+    # *-staging sibling. No target -> apply to every detected site.
+    if [ -n "$target_site" ]; then
+        if docroot=$(_resolve_target_docroot "$target_site"); then
+            _lscwp_apply_site "$docroot" || rc=1
+        else
+            log_warn "LSCWP: target '${target_site}' matched no detected WordPress site — skipping"
         fi
+        return $rc
+    fi
+    for docroot in "${LSO_WP_SITES[@]}"; do
         _lscwp_apply_site "$docroot" || rc=1
     done
     return $rc
@@ -429,7 +437,8 @@ feature_detect_custom_lscwp() {
     _lscwp_have_wpcli || return 1
     [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ] || return 1
 
-    local docroot="${LSO_WP_SITES[0]}"
+    local docroot
+    docroot=$(_resolve_target_docroot "${TARGET_SITE:-}") || docroot="${LSO_WP_SITES[0]}"
     local ttl
     ttl=$(lso_wp "$docroot" litespeed-option get cache-ttl_pub 2>/dev/null) || return 1
     [ "$ttl" = "604800" ]
