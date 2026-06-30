@@ -87,6 +87,48 @@ copy_file_ownership() {
 }
 
 ################################################################################
+# HTTP basic-auth via curl --config (keeps creds off the curl argv / out of `ps`)
+################################################################################
+
+# Credentials in ${LSO_HTTP_AUTH} ("user:pass") must NOT go on the curl command
+# line, where any local user could read them via `ps`. Instead we write them to
+# a mode-600 curl config file ONCE and pass `--config <path>`. A `user = "..."`
+# directive behaves EXACTLY like `--user` (so creds are dropped on a cross-host
+# redirect, unlike a netrc `default` entry which would forward them), and the
+# quoted form is whitespace-safe (unlike a bare argv token).
+#
+# IMPORTANT: _lso_auth_init must run in the PARENT shell (e.g. once from main),
+# NOT inside a `$(...)` — every call site reads the path via command
+# substitution (a subshell), so a mutation made there would be lost and each
+# curl would leak a fresh temp. Creation is therefore separated from reading:
+#   _lso_auth_init    — create the config temp once, in the parent (idempotent)
+#   _lso_auth_args    — pure read; echoes `--config <path>` (subshell-safe)
+#   _lso_auth_cleanup — remove the temp (call from the EXIT trap)
+LSO_AUTH_FILE=""
+_lso_auth_init() {
+    [ -n "${LSO_HTTP_AUTH:-}" ] || return 0
+    [ -n "$LSO_AUTH_FILE" ] && [ -f "$LSO_AUTH_FILE" ] && return 0
+    LSO_AUTH_FILE=$(secure_mktemp "${LSO_DATA_DIR:-${TMPDIR:-/tmp}}/.lso-auth.XXXXXX" 2>/dev/null) \
+        || { LSO_AUTH_FILE=""; return 1; }
+    chmod 600 "$LSO_AUTH_FILE" 2>/dev/null || true
+    # curl config quoted-string escaping: backslash and double-quote.
+    local esc=$LSO_HTTP_AUTH
+    esc=${esc//\\/\\\\}
+    esc=${esc//\"/\\\"}
+    printf 'user = "%s"\n' "$esc" > "$LSO_AUTH_FILE"
+}
+
+_lso_auth_args() {
+    [ -n "$LSO_AUTH_FILE" ] && printf '%s' "--config $LSO_AUTH_FILE"
+    return 0
+}
+
+_lso_auth_cleanup() {
+    [ -n "$LSO_AUTH_FILE" ] && rm -f "$LSO_AUTH_FILE" 2>/dev/null
+    LSO_AUTH_FILE=""
+}
+
+################################################################################
 # PHP environment probes
 ################################################################################
 

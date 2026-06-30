@@ -25,8 +25,8 @@ _bench_median() {
 # _bench_probe <url> -> "dns_ms connect_ms tls_ms ttfb_ms http_code"
 _bench_probe() {
     local url="$1"
-    local auth_args=""
-    [ -n "${LSO_HTTP_AUTH:-}" ] && auth_args="--user ${LSO_HTTP_AUTH}"
+    local auth_args
+    auth_args=$(_lso_auth_args)
     # curl failure must not trip set -o pipefail — empty output signals failure
     # shellcheck disable=SC2086
     { curl -o /dev/null -s -m 20 $auth_args \
@@ -38,8 +38,8 @@ _bench_probe() {
 # _bench_cache_header <url> -> value of x-litespeed-cache header (or empty)
 _bench_cache_header() {
     local url="$1"
-    local auth_args=""
-    [ -n "${LSO_HTTP_AUTH:-}" ] && auth_args="--user ${LSO_HTTP_AUTH}"
+    local auth_args
+    auth_args=$(_lso_auth_args)
     # shellcheck disable=SC2086
     { curl -sI -m 20 $auth_args "$url" 2>/dev/null || true; } | tr -d '\r' | \
         awk -F': ' 'tolower($1) == "x-litespeed-cache" { print $2; exit }'

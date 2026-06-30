@@ -717,6 +717,66 @@ else
 fi
 
 ################################################################################
+# SECTION 9c: curl auth-config helper (creds off the curl argv)
+################################################################################
+log_section "curl Auth Config Tests"
+
+# No auth configured -> init no-ops, _lso_auth_args emits nothing.
+nr_empty=$(
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    unset LSO_HTTP_AUTH
+    _lso_auth_init
+    _lso_auth_args
+)
+if [ -z "$nr_empty" ]; then
+    log_pass "auth: no auth -> no args emitted"
+else
+    log_fail "auth: expected empty, got [$nr_empty]"
+fi
+
+# Auth configured: init (parent shell) creates a mode-600 curl config with a
+# quoted `user = "..."` directive; _lso_auth_args (read-only, subshell-safe)
+# echoes --config <path> and re-reads the SAME path on repeated calls; the
+# credential never appears in the emitted args.
+NR_DIR="${TEST_TMP}/authcfg"
+mkdir -p "$NR_DIR"
+nr_out=$(
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    LSO_DATA_DIR="$NR_DIR"
+    LSO_HTTP_AUTH="bob:s3c r3t"   # space in password: quoted form must preserve it
+    _lso_auth_init
+    # both reads (each in their own $(...)) must return the same path
+    args=$(_lso_auth_args)
+    args2=$(_lso_auth_args)
+    printf '%s\n' "$args"
+    [ "$args" = "$args2" ] && echo "REUSED"
+)
+nr_file=$(printf '%s\n' "$nr_out" | awk 'NR==1 {print $2}')
+if printf '%s\n' "$nr_out" | head -1 | grep -q -- '--config ' && ! printf '%s' "$nr_out" | grep -q 's3c r3t' ; then
+    log_pass "auth: emits --config, credential not on argv"
+else
+    log_fail "auth: args wrong or creds leaked: [$nr_out]"
+fi
+if printf '%s\n' "$nr_out" | grep -q "REUSED"; then
+    log_pass "auth: same path returned across reads (subshell-safe)"
+else
+    log_fail "auth: path not stable across reads: [$nr_out]"
+fi
+if [ -f "$nr_file" ]; then
+    nr_mode=$(stat -f '%Lp' "$nr_file" 2>/dev/null || stat -c '%a' "$nr_file" 2>/dev/null)
+    if [ "$nr_mode" = "600" ] && grep -q 'user = "bob:s3c r3t"' "$nr_file"; then
+        log_pass "auth: file is mode 600 with quoted user directive (whitespace-safe)"
+    else
+        log_fail "auth: file mode/content wrong (mode=$nr_mode)"
+    fi
+    rm -f "$nr_file"
+else
+    log_fail "auth: temp file not created at [$nr_file]"
+fi
+
+################################################################################
 # SECTION 10: confedit env primitives ("env VAR=value" lines, "name arg" blocks)
 ################################################################################
 log_section "confedit env Primitives"

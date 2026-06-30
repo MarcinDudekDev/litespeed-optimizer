@@ -872,12 +872,17 @@ main() {
             transaction_rollback
             log_warn "Transaction rolled back due to interruption" 2>/dev/null || true
         fi
+        type -t _lso_auth_cleanup &>/dev/null && _lso_auth_cleanup
         release_lock
     }
     trap cleanup_handler EXIT INT TERM
 
     QUIET=true check_prerequisites
     source_libraries
+
+    # Materialize the curl auth-config temp once in this (parent) shell so every
+    # curl call site can read --config via $(...) without leaking a temp per request.
+    type -t _lso_auth_init &>/dev/null && _lso_auth_init
 
     case "$COMMAND" in
         detect)    cmd_detect ;;
