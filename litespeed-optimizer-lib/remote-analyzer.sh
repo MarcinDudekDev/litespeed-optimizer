@@ -254,6 +254,28 @@ run_remote_analyze() {
         _az_check 1 security "no x-powered-by leakage" pass ""
     fi
 
+    # Bad-bot UA blocker (opt-in feature) — ONE active probe carrying a well-known
+    # scraper UA (a crawler name, not an attack payload, so it is benign and won't
+    # trip a rate-ban). A defended site answers 403/406/429/444; an open one 2xx.
+    # The block could come from this tool's .htaccess denylist OR a CDN/WAF, so the
+    # pass is informational and does NOT claim attribution. Opt-in => a non-block
+    # is advisory (warn, non-scoring). no-cache so a cached 200 can't mask a deny.
+    if [ "$_RM_REQ_COUNT" -lt "${LSO_REMOTE_MAX:-25}" ]; then
+        if _rm_request "$url" "" -H "Cache-Control: no-cache" -A "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"; then
+            local bb_status
+            bb_status=$(tr -d '\r' < "$_RM_HDR_FILE" | awk 'NR==1 {print $2}')
+            case "$bb_status" in
+                403|406|429|444)
+                    _az_check 3 security "scraper UA blocked (HTTP ${bb_status}) — bad-bot defense active (.htaccess denylist or CDN/WAF)" pass "" ;;
+                *)
+                    _az_check 3 security "scraper UA not blocked (HTTP ${bb_status:-?}) — optional hardening" warn \
+                        "optimize --feature security --badbots (per-site .htaccess UA denylist)" ;;
+            esac
+        fi
+    else
+        _az_check 3 security "bad-bot UA probe skipped (remote request cap reached)" skip ""
+    fi
+
     ############################################################
     # 5. TTFB (3 timed probes; homepage is warm by now)
     ############################################################

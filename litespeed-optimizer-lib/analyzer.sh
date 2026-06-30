@@ -477,6 +477,27 @@ run_analyze() {
         fi
     fi
 
+    # Bad-bot UA blocker (per-site .htaccess, edition-agnostic). OPT-IN, so
+    # present -> pass (rewards the hardening); absent -> warn (advisory,
+    # non-scoring) — its absence is not a defect, just unused optional hardening.
+    if [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ]; then
+        local bb_have=true bb_seen=0 bb_site
+        for bb_site in "${LSO_WP_SITES[@]}"; do
+            [ -f "${bb_site%/}/wp-config.php" ] || continue
+            bb_seen=$((bb_seen + 1))
+            # Require the actual rule token, not just the BEGIN marker comment, so
+            # an empty/hand-stubbed marker block can't score a false pass.
+            grep -q "lso_bad_bot" "${bb_site%/}/.htaccess" 2>/dev/null || bb_have=false
+        done
+        if [ "$bb_seen" -gt 0 ]; then
+            if [ "$bb_have" = true ]; then
+                _az_check 3 security "bad-bot UA blocker deployed (.htaccess)" pass ""
+            else
+                _az_check 3 security "bad-bot UA blocker not deployed (optional hardening)" warn "optimize --feature security --badbots"
+            fi
+        fi
+    fi
+
     ############################################################
     # Score
     ############################################################
