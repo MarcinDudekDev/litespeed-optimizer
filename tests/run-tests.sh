@@ -1952,13 +1952,22 @@ sys.exit(1 if unknown else 0)
         log_pass "export ${prof}: object-cache keys excluded by default"
     fi
 
-    # README companion exists with import steps
-    if grep -q "Toolbox > Import / Export" "${out%.data}.README.md" 2>/dev/null; then
-        log_pass "export ${prof}: README companion with wp-admin steps"
+    # README companion is opt-in: default export must NOT write one.
+    if [ -f "${out%.data}.README.md" ]; then
+        log_fail "export ${prof}: README written without --with-readme (should be opt-in)"
     else
-        log_fail "export ${prof}: README missing/incomplete"
+        log_pass "export ${prof}: no README by default (opt-in)"
     fi
 done
+
+# --with-readme opt-in produces the companion README with wp-admin steps.
+out_rm="${XP_DIR}/p-readme.data"
+"${OPTIMIZER}" export-profile --profile woocommerce --out "$out_rm" --with-readme >/dev/null 2>&1 || true
+if grep -q "Toolbox > Import / Export" "${out_rm%.data}.README.md" 2>/dev/null; then
+    log_pass "export --with-readme: README companion with wp-admin steps"
+else
+    log_fail "export --with-readme: README missing/incomplete"
+fi
 
 # Safety invariants inside the exported woocommerce payload
 woo_data="${XP_DIR}/p-woocommerce.data"
@@ -1987,6 +1996,48 @@ if [ -f "${out_noext}.data" ]; then
     log_pass "export-profile enforces .data extension (admin upload requirement)"
 else
     log_fail "export-profile did not enforce .data extension"
+fi
+
+################################################################################
+# SECTION 19b: server-tuning detect short-circuits on Enterprise (XML config)
+################################################################################
+log_section "Server-Tuning Enterprise Detect"
+
+# The OLS line parser (ols_get) cannot read Enterprise XML, so running it there
+# is meaningless. Stub the deps so the OLS path WOULD report "applied", then
+# confirm LSO_EDITION=enterprise short-circuits to not-applied (rc 1), while the
+# OLS edition still reports applied (rc 0).
+st_detect_rc() {
+    local edition="$1"
+    (
+        log_warn() { :; }; log_info() { :; }; log_error() { :; }
+        sysinfo_ram_mb() { echo 4096; }
+        lso_max_connections() { echo 1500; }
+        ols_get() {
+            case "$3" in
+                maxConnections) echo 1500 ;;
+                gzipAutoUpdateStatic) echo 1 ;;
+            esac
+        }
+        feature_register() { :; }
+        LSO_EDITION="$edition"
+        LSO_MAIN_CONF="$ST_CONF"
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/features/server-tuning.sh"
+        feature_detect_custom_server_tuning "$ST_CONF"
+    )
+}
+ST_CONF="${TEST_TMP}/st.conf"
+echo "stub" > "$ST_CONF"
+if st_detect_rc ols; then
+    log_pass "server-tuning detect: OLS with tier values -> applied"
+else
+    log_fail "server-tuning detect: OLS should report applied"
+fi
+if st_detect_rc enterprise; then
+    log_fail "server-tuning detect: Enterprise should short-circuit to not-applied"
+else
+    log_pass "server-tuning detect: Enterprise short-circuits (no XML line-parse)"
 fi
 
 # Golden payload comparison

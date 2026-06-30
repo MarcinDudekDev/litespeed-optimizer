@@ -111,6 +111,14 @@ feature_detect_custom_server_tuning() {
     local config_file="${1:-${LSO_MAIN_CONF:-}}"
     [ -f "$config_file" ] || return 1
 
+    # On LSWS Enterprise the config is XML, not the flat OLS key/value format that
+    # ols_get parses — running the line parser there yields a false "not applied".
+    # The apply path is report-only on Enterprise (tuning{} is WebAdmin/XML-managed),
+    # so detection cannot meaningfully report "applied" either; treat as not-applied.
+    if [ "${LSO_EDITION:-}" = "enterprise" ]; then
+        return 1
+    fi
+
     # Applied = our marker key present AND maxConnections at the tier value
     local ram want got
     ram=$(sysinfo_ram_mb)
