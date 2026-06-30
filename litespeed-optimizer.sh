@@ -507,6 +507,26 @@ cmd_analyze() {
 }
 
 cmd_optimize() {
+    # optimize restarts LiteSpeed and writes server config — require root unless
+    # this is a dry-run or a fixture-tree test (LSO_FS_ROOT set).
+    if [ "$DRY_RUN" = false ] && [ -z "${LSO_FS_ROOT:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        log_error "optimize must run as root (it restarts LiteSpeed and writes config). Re-run with sudo."
+        exit 1
+    fi
+
+    # Snapshot the pre-change health baseline BEFORE touching anything, so the
+    # post-restart health check can detect a regression. Resolve the real vhost
+    # URL from the first WordPress site when possible (catches a broken vhost the
+    # default 127.0.0.1 vhost would otherwise mask). Skipped in fixture/test mode.
+    if [ "$DRY_RUN" = false ] && [ "${LSO_SKIP_RESTART:-0}" != "1" ] && [ -z "${LSO_FS_ROOT:-}" ] \
+        && type -t snapshot_baseline &>/dev/null; then
+        local _vhost_url=""
+        if [ -n "${LSO_WP_SITES+x}" ] && [ "${#LSO_WP_SITES[@]}" -gt 0 ] && type -t lso_wp &>/dev/null; then
+            _vhost_url=$(lso_wp "${LSO_WP_SITES[0]}" option get home 2>/dev/null | tr -d '\r') || _vhost_url=""
+        fi
+        snapshot_baseline "$_vhost_url"
+    fi
+
     # Create backup first (skip on dry-run)
     if [ "$DRY_RUN" = false ]; then
         if type -t create_backup &>/dev/null; then
@@ -556,6 +576,13 @@ cmd_rollback() {
     if [[ ! "$backup_timestamp" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
         log_error "Invalid backup timestamp format: $backup_timestamp"
         log_error "Expected format: YYYYMMDD-HHMMSS (e.g., 20260610-143022)"
+        exit 1
+    fi
+
+    # rollback restores config and restarts LiteSpeed — require root unless this
+    # is a fixture-tree test (LSO_FS_ROOT set).
+    if [ -z "${LSO_FS_ROOT:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        log_error "rollback must run as root (it restores config and restarts LiteSpeed). Re-run with sudo."
         exit 1
     fi
 

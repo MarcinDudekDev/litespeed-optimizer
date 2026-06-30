@@ -57,6 +57,22 @@ _rm_header() {
     tr -d '\r' < "$_RM_HDR_FILE" | awk -F': ' -v h="$1" 'tolower($1) == h { print substr($0, index($0, ": ") + 2); exit }'
 }
 
+# _rm_woo_block_check <page> <url> — warn when the just-fetched cart/checkout
+# page renders via WooCommerce blocks. A block cart/checkout shows the empty-cart
+# fallback if any perf layer strips/disables WC block rendering, so checkout
+# silently breaks while still returning HTTP 200. Inspects the current
+# $_RM_BODY_FILE (the page must have been fetched immediately before this call).
+_rm_woo_block_check() {
+    local page="$1" page_url="$2"
+    [ -s "$_RM_BODY_FILE" ] || return 0
+    # Rendered block wrappers (front-end) and the raw block comment (editor markup
+    # that survives on pages with block rendering disabled): woocommerce/cart|checkout
+    if grep -Eqi "wp-block-woocommerce-${page}|wc-block-${page}|<!-- *wp:woocommerce/${page}|data-block[_-]name=\"woocommerce/${page}\"" "$_RM_BODY_FILE"; then
+        _az_check 2 woo "${page} page (${page_url}) uses WooCommerce blocks — block-disabling perf tweaks render the empty-${page} fallback regardless of real cart contents (checkout silently breaks; the page still returns 200)" warn \
+            "if you disable WC blocks anywhere, switch this page to the [woocommerce_${page}] shortcode; otherwise verify ${page} still works after any block-stripping optimization"
+    fi
+}
+
 # _rm_ttfb <url> — single timed probe (counts against the cap)
 _rm_ttfb() {
     local url="$1"
@@ -315,8 +331,20 @@ run_remote_analyze() {
             _az_check 8 woo "cart page URL not found (HTTP ${cart_status} on ${cart_probe_url} — localized slug?)" skip ""
         fi
 
-        local co_status
-        _rm_request "${url}checkout/" || true
+        # Block-vs-shortcode guard. The cart body is still in $_RM_BODY_FILE (no
+        # request since the cart fetch). A block-rendered cart leaves the
+        # wp-block-woocommerce-cart / wc-block-cart wrapper in the front-end HTML.
+        # If a perf layer strips/disables WC block rendering, a block cart renders
+        # the empty-cart FALLBACK regardless of real cart contents — checkout
+        # becomes impossible while the mini-cart badge still shows the count, so an
+        # HTTP-200 smoke test passes. (Reproduced on litespeed-demo 2026-06-16; fix
+        # was switching the page to the [woocommerce_cart] shortcode.)
+        if [ "$cart_status" = "200" ]; then
+            _rm_woo_block_check "cart" "$cart_probe_url"
+        fi
+
+        local co_status co_probe_url="${url}checkout/"
+        _rm_request "$co_probe_url" || true
         co_status=$(tr -d '\r' < "$_RM_HDR_FILE" | awk 'NR==1 {print $2}')
         cache_hdr=$(_rm_header "x-litespeed-cache")
         if [ "$co_status" = "200" ] && echo "$cache_hdr" | grep -qi "hit"; then
@@ -325,6 +353,9 @@ run_remote_analyze() {
             _az_check 4 woo "checkout not cache-served" pass ""
         else
             _az_check 4 woo "checkout URL not found (HTTP ${co_status} — localized slug?)" skip ""
+        fi
+        if [ "$co_status" = "200" ]; then
+            _rm_woo_block_check "checkout" "$co_probe_url"
         fi
 
         _rm_request "${url}?wc-ajax=get_refreshed_fragments" || true

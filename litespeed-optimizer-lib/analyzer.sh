@@ -15,7 +15,10 @@ _AZ_TOTAL=0
 _AZ_DANGER=0
 _AZ_JSON_ITEMS=""
 
-# _az_check <weight> <category> <name> <status:pass|fail|skip> <fix-hint>
+# _az_check <weight> <category> <name> <status:pass|fail|warn|danger|skip> <fix-hint>
+# warn = visible advisory that does NOT affect the score (weight ignored): a
+# conditional risk, not a present defect (e.g. using a feature that is only a
+# problem in combination with another choice).
 _az_check() {
     local weight="$1" category="$2" name="$3" status="$4" fix="$5"
 
@@ -37,6 +40,14 @@ _az_check() {
             _AZ_DANGER=$((_AZ_DANGER + 1))
             if [ "${JSON_OUTPUT:-false}" != true ]; then
                 log_error "  [${category}] DANGER: ${name}"
+                [ -n "$fix" ] && echo "       FIX: ${fix}"
+            fi
+            ;;
+        warn)
+            # Advisory: visible but NOT scored (weight ignored, denominator
+            # untouched) — a conditional risk, not a present defect.
+            if [ "${JSON_OUTPUT:-false}" != true ]; then
+                log_warn "  [${category}] NOTE: ${name}"
                 [ -n "$fix" ] && echo "       FIX: ${fix}"
             fi
             ;;
