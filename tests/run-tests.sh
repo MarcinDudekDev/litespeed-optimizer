@@ -1858,6 +1858,37 @@ if [ "$ti_ok_rc" -eq 0 ]; then
 else
     log_fail "security: --trusted-ip wrongly rejected a valid IPv6/CIDR (exit ${ti_ok_rc})"
 fi
+# An out-of-range CIDR prefix and an empty token-list are rejected.
+ti_cidr_rc=0
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" \
+    "${OPTIMIZER}" optimize --feature security --trusted-ip "10.0.0.0/999" --dry-run >/dev/null 2>&1 || ti_cidr_rc=$?
+ti_empty_rc=0
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" \
+    "${OPTIMIZER}" optimize --feature security --trusted-ip "," --dry-run >/dev/null 2>&1 || ti_empty_rc=$?
+if [ "$ti_cidr_rc" -ne 0 ] && [ "$ti_empty_rc" -ne 0 ]; then
+    log_pass "security: --trusted-ip rejects out-of-range CIDR and empty list"
+else
+    log_fail "security: --trusted-ip CIDR/empty handling wrong (cidr=${ti_cidr_rc} empty=${ti_empty_rc})"
+fi
+# Re-apply with --trusted-ip stays idempotent (single badbots block).
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --badbots --trusted-ip "203.0.113.5" --force >/dev/null 2>&1 || true
+if [ "$(grep -c "# BEGIN litespeed-optimizer badbots" "$SEC_HT" 2>/dev/null)" = "1" ]; then
+    log_pass "security: --trusted-ip re-apply is idempotent (single block)"
+else
+    log_fail "security: --trusted-ip re-apply duplicated the block"
+fi
+# Env var LSO_TRUSTED_IPS is honoured (not wiped by the global init).
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    LSO_TRUSTED_IPS="192.0.2.7" \
+    "${OPTIMIZER}" optimize --feature security --badbots --force >/dev/null 2>&1 || true
+if grep -q "Require ip 192.0.2.7" "$SEC_HT" 2>/dev/null; then
+    log_pass "security: LSO_TRUSTED_IPS env var honoured"
+else
+    log_fail "security: LSO_TRUSTED_IPS env var ignored"
+fi
 
 # Enterprise: WordPressProtect via include
 SEC_ENT_FIX="${TEST_TMP}/sec-ent-fix"

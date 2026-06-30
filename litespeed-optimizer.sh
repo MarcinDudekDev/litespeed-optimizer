@@ -59,11 +59,12 @@ EXCLUDE_FEATURE=""
 PROFILE="auto"
 TARGET_SITE=""
 LOAD_MODE=false
-# Space-separated allowlist of trusted IPs/CIDRs (set by --trusted-ip). Exempts
-# these sources from the bad-bot blocker now, and from fail2ban/throttling/CAPTCHA
-# as those live features land. Consumed via _lso_trusted_ips.
+# Space-separated allowlist of trusted IPs/CIDRs (set by --trusted-ip, or via the
+# LSO_TRUSTED_IPS env var). Exempts these sources from the bad-bot blocker now,
+# and from fail2ban/throttling/CAPTCHA as those live features land. Read directly
+# as ${LSO_TRUSTED_IPS:-} by consumers. Honour a pre-set env value (don't clobber).
 # shellcheck disable=SC2034  # consumed by lib/features/security.sh (badbots) + future live features
-LSO_TRUSTED_IPS=""
+LSO_TRUSTED_IPS="${LSO_TRUSTED_IPS:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the 7 REGISTERED features (lib/features/*.sh); keep this list in
@@ -97,7 +98,13 @@ _validate_ip() {
     [ -n "$ip" ] || return 1
     [[ "$ip" =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] || return 1
     # Must contain a dot (IPv4) or a colon (IPv6) so a bare number can't pass.
-    [[ "$ip" == *.* || "$ip" == *:* ]]
+    [[ "$ip" == *.* || "$ip" == *:* ]] || return 1
+    # If a CIDR prefix is present, bound it (0-128 covers IPv4 /32 and IPv6 /128).
+    if [[ "$ip" == */* ]]; then
+        local prefix="${ip##*/}"
+        [ "$prefix" -ge 0 ] && [ "$prefix" -le 128 ] || return 1
+    fi
+    return 0
 }
 
 # Validate feature name against allowed list
@@ -821,13 +828,19 @@ parse_arguments() {
                 fi
                 # Accept comma or whitespace separators; validate each; accumulate.
                 _ti_raw="${2//,/ }"
+                _ti_n=0
                 for _ti in $_ti_raw; do
                     if ! _validate_ip "$_ti"; then
                         log_error "--trusted-ip: invalid IP/CIDR: $_ti"
                         exit 1
                     fi
                     LSO_TRUSTED_IPS="${LSO_TRUSTED_IPS:+$LSO_TRUSTED_IPS }${_ti}"
+                    _ti_n=$((_ti_n + 1))
                 done
+                if [ "$_ti_n" -eq 0 ]; then
+                    log_error "--trusted-ip: no valid IP/CIDR in '$2'"
+                    exit 1
+                fi
                 export LSO_TRUSTED_IPS
                 shift 2
                 ;;
