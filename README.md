@@ -11,7 +11,7 @@ Sibling project of [nginx-optimizer](https://github.com/MarcinDudekDev/nginx-opt
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![lint: shellcheck](https://img.shields.io/badge/lint-shellcheck-brightgreen.svg)](https://www.shellcheck.net/)
 [![bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-lightgrey.svg)](#requirements)
-[![version](https://img.shields.io/badge/version-0.7.5-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.8.0-blue.svg)](CHANGELOG.md)
 
 Detect → audit → tune → verify, with a timestamped backup and an automatic rollback behind every change. It covers RAM-tier server tuning, WordPress/WooCommerce cache safety, security hardening, a scored 0–100 audit, benchmarking, no-SSH remote analysis (`analyze --remote`, `export-profile`), and web-SAPI probes for the gaps CLI tools miss (`probe-redis`, `probe-opcache`). See the [roadmap](ROADMAP.md) for what's planned next.
 
@@ -68,7 +68,7 @@ cd litespeed-optimizer && ./install.sh
 ## Usage
 
 ```bash
-litespeed-optimizer --version           # litespeed-optimizer version 0.7.5
+litespeed-optimizer --version           # litespeed-optimizer version 0.8.0
 litespeed-optimizer detect              # what am I running?
 litespeed-optimizer check               # safe to optimize?
 litespeed-optimizer optimize --dry-run  # preview all changes
