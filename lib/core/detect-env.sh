@@ -20,7 +20,7 @@ fi
 # Globals exported by detect_environment()
 LSO_LSWS_ROOT=""
 LSO_EDITION=""          # ols | enterprise
-LSO_PANEL=""            # cyberpanel | cpanel | directadmin | runcloud | plain
+LSO_PANEL=""            # cyberpanel | cpanel | directadmin | runcloud | plesk | adc | enhance | aapanel | cloudpanel | hestia | ispconfig | plain
 LSO_MAIN_CONF=""
 LSO_APACHE_INCLUDE=""
 LSO_VHOSTS_DIR=""
@@ -91,7 +91,10 @@ _detect_edition() {
     return 0
 }
 
-# Panel detection via directory markers
+# Panel detection via directory markers. Order = most specific / most common
+# first. cyberpanel + cpanel are fully supported; directadmin/runcloud and the
+# panels below regenerate or own the server config, so optimize treats their
+# server-config features as manual-only (see apply_optimizations panel policy).
 _detect_panel() {
     if [ -d "$(_lso_fs /usr/local/CyberCP)" ] || [ -d "$(_lso_fs /etc/cyberpanel)" ]; then
         LSO_PANEL="cyberpanel"
@@ -101,9 +104,38 @@ _detect_panel() {
         LSO_PANEL="directadmin"
     elif [ -d "$(_lso_fs /etc/runcloud)" ] || [ -d "$(_lso_fs /opt/runcloud)" ]; then
         LSO_PANEL="runcloud"
+    elif [ -d "$(_lso_fs /usr/local/psa)" ] || [ -d "$(_lso_fs /opt/psa)" ]; then
+        # Plesk (the LiteSpeed-for-Plesk extension manages the config).
+        LSO_PANEL="plesk"
+    elif [ -d "$(_lso_fs /usr/local/lslb)" ]; then
+        # LiteSpeed Web ADC (load balancer — config is owned by the ADC, not us).
+        LSO_PANEL="adc"
+    elif [ -d "$(_lso_fs /var/local/enhance)" ] || [ -d "$(_lso_fs /opt/enhance)" ]; then
+        # Enhance control panel (regenerates configs from its own templates).
+        LSO_PANEL="enhance"
+    elif [ -d "$(_lso_fs /www/server/panel)" ]; then
+        # aaPanel / BT-panel (regenerates OLS configs from its UI).
+        LSO_PANEL="aapanel"
+    elif [ -d "$(_lso_fs /home/clp)" ] || [ -d "$(_lso_fs /etc/cloudpanel)" ]; then
+        LSO_PANEL="cloudpanel"
+    elif [ -d "$(_lso_fs /usr/local/hestia)" ]; then
+        LSO_PANEL="hestia"
+    elif [ -d "$(_lso_fs /usr/local/ispconfig)" ]; then
+        LSO_PANEL="ispconfig"
     else
         LSO_PANEL="plain"
     fi
+}
+
+# True when LSO_PANEL regenerates or OWNS the server config, so direct
+# httpd_config edits get clobbered — server-config features must emit manual
+# steps instead of writing. Single source of truth for the manual-only policy
+# (consumed by apply_optimizations, the security feature, and the detect warning).
+_lso_panel_restricted() {
+    case "${LSO_PANEL:-}" in
+        directadmin|runcloud|plesk|adc|enhance|aapanel|cloudpanel|hestia|ispconfig) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Per-panel config paths and restart commands

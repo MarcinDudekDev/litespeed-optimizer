@@ -216,6 +216,12 @@ _sec_report_modsec() {
 feature_apply_custom_security() {
     if [ "${LSO_EDITION:-}" = "enterprise" ]; then
         _sec_apply_enterprise
+    elif type -t _lso_panel_restricted >/dev/null 2>&1 && _lso_panel_restricted; then
+        # Panel owns/regenerates httpd_config — writing the throttling block there
+        # would be clobbered. Print it as a manual step (matches the optimizer's
+        # panel policy) and still apply the per-site .htaccess hardening below.
+        log_warn "security: ${LSO_PANEL} manages server config — perClientConnLimit throttling is manual-only"
+        log_info "  Add via the panel/WebAdmin (it will persist): perClientConnLimit { dynReqPerSec 2; staticReqPerSec 40; softLimit 15; hardLimit 20; gracePeriod 15; banPeriod 300; blockBadReq 1 }"
     else
         local conf="${LSO_MAIN_CONF:-}"
         if [ -z "$conf" ] || [ ! -f "$conf" ]; then
