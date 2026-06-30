@@ -67,12 +67,13 @@ apply_optimizations() {
     fi
     log_info "Target: ${LSO_EDITION} (${LSO_PANEL}) at ${LSO_LSWS_ROOT}"
 
-    # DirectAdmin/RunCloud panel policy: server-config features are manual-only
+    # Panel policy: panels that regenerate or own the server config get
+    # server-config features as manual-only (we'd otherwise fight the panel).
     local panel_restricted=false
     case "${LSO_PANEL:-}" in
-        directadmin|runcloud)
+        directadmin|runcloud|plesk|adc|enhance|aapanel)
             panel_restricted=true
-            log_warn "${LSO_PANEL}: server config writes are manual-only (panel regenerates configs)"
+            log_warn "${LSO_PANEL}: server config writes are manual-only (panel regenerates/owns configs)"
             log_warn "Applying opcache/lscwp/woocommerce/security only; server-tuning/lsapi/lscache steps will be printed for manual application"
             ;;
     esac

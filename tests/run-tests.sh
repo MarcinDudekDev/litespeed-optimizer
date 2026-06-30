@@ -195,6 +195,63 @@ detect_fixture "cyberpanel"        "ols"        "cyberpanel"
 detect_fixture "cpanel-enterprise" "enterprise" "cpanel"
 detect_fixture "directadmin"       "ols"        "directadmin"
 
+# Panel-marker detection for the regenerate/own-config panels (Plesk, LiteSpeed
+# Web ADC, Enhance, aaPanel). _detect_panel only checks directory markers, so a
+# minimal LSO_FS_ROOT with just the marker dir is enough (no full LSWS tree).
+# panel_marker <label> <relative-marker-dir> <expected-panel>
+panel_marker() {
+    local label="$1" marker="$2" want="$3"
+    local got
+    got=$(
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/core/detect-env.sh"
+        root=$(mktemp -d "${TMPDIR:-/tmp}/lso-panel.XXXXXX")
+        mkdir -p "${root}${marker}"
+        export LSO_FS_ROOT="$root"
+        _detect_panel
+        printf '%s' "$LSO_PANEL"
+        rm -rf "$root"
+    )
+    if [ "$got" = "$want" ]; then
+        log_pass "panel detect: ${label} marker -> ${got}"
+    else
+        log_fail "panel detect: ${label} got '${got}', want '${want}'"
+    fi
+}
+panel_marker "Plesk"            "/usr/local/psa"      "plesk"
+panel_marker "LiteSpeed ADC"    "/usr/local/lslb"     "adc"
+panel_marker "Enhance"          "/var/local/enhance"  "enhance"
+panel_marker "aaPanel"          "/www/server/panel"   "aapanel"
+# No marker -> plain (regression guard for the new branches).
+panel_marker "no-marker"        "/var/empty-x"        "plain"
+
+# Each regenerate/own-config panel must be in the manual-only gate (panel_restricted).
+gate_panel() {
+    local panel="$1"
+    local got
+    got=$(
+        log_info() { :; }; log_warn() { echo "WARN $*"; }; log_error() { echo "ERR $*" >&2; }
+        log_success() { :; }
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/lib/core/helpers.sh"
+        # shellcheck source=/dev/null
+        source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
+        LSO_EDITION=ols LSO_PANEL="$panel" LSO_LSWS_ROOT=/x
+        resolve_profile_features() { echo ""; }   # empty -> loop no-ops, we only want the policy log
+        feature_get_by_alias() { echo ""; }
+        apply_optimizations "" "" "" auto 2>&1 || true
+    )
+    if echo "$got" | grep -qi "manual-only"; then
+        log_pass "panel gate: ${panel} -> server config manual-only"
+    else
+        log_fail "panel gate: ${panel} not restricted: $got"
+    fi
+}
+gate_panel plesk
+gate_panel adc
+gate_panel enhance
+gate_panel aapanel
+
 # broken-edge: lsws root exists but no main config -> detect must fail cleanly
 if LSO_FS_ROOT="${CONFIGS_DIR}/broken-edge" "${OPTIMIZER}" detect 2>/dev/null; then
     log_fail "broken-edge: detect should fail (no main config)"
