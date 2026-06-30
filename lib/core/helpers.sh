@@ -264,11 +264,29 @@ get_dir_mtime() {
 TRANSACTION_FILES=()
 TRANSACTION_TEMPS=()
 TRANSACTION_ACTIVE=false
+# Count of staged confedit WRITES this transaction (incremented per ols_set/
+# ols_set_env routed to staging). Unlike the file count it rises on EVERY staged
+# write, even repeated edits to the same already-staged file — so callers can tell
+# whether a given feature actually wrote config (the file count can't, due to
+# same-file dedup).
+# shellcheck disable=SC2034  # mutated in confedit.sh (_confedit_route), read in optimizer.sh
+TRANSACTION_WRITES=0
+# Count of FAILED staged confedit writes this transaction (secure_mktemp/awk/mv
+# failure inside ols_set/ols_set_env). The optimize loop checks this AFTER each
+# feature even when feature_apply returned 0 — a feature can swallow a write
+# failure (errexit is off inside `if feature_apply`), and committing its partial
+# config would be worse than a false rollback.
+# shellcheck disable=SC2034  # mutated in confedit.sh, read in optimizer.sh
+TRANSACTION_WRITE_ERRORS=0
 
 # Start transaction: prepare to modify multiple files atomically
 transaction_start() {
     TRANSACTION_FILES=()
     TRANSACTION_TEMPS=()
+    # shellcheck disable=SC2034  # read cross-file in confedit.sh/optimizer.sh
+    TRANSACTION_WRITES=0
+    # shellcheck disable=SC2034  # read cross-file in confedit.sh/optimizer.sh
+    TRANSACTION_WRITE_ERRORS=0
     TRANSACTION_ACTIVE=true
 }
 
@@ -284,6 +302,21 @@ transaction_stage() {
     if [ ! "$TRANSACTION_ACTIVE" = true ]; then
         log_error "No active transaction. Call transaction_start first."
         return 1
+    fi
+
+    # Dedup by path: if this file is already staged (an earlier feature edited it
+    # in this same run), reuse its existing temp so successive edits accumulate
+    # onto the staged copy — NOT a fresh copy of the untouched original (which
+    # would discard the earlier edits on commit).
+    if [ "${#TRANSACTION_FILES[@]}" -gt 0 ]; then
+        local j
+        for ((j=0; j<${#TRANSACTION_FILES[@]}; j++)); do
+            if [ "${TRANSACTION_FILES[$j]}" = "$original_path" ]; then
+                # shellcheck disable=SC2034  # Consumed by callers after transaction_stage
+                TXN_TEMP_FILE="${TRANSACTION_TEMPS[$j]}"
+                return 0
+            fi
+        done
     fi
 
     local target_dir

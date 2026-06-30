@@ -680,6 +680,213 @@ else
     log_fail "$leftover temp files left behind"
 fi
 
+# --- Read-your-writes: ols_get inside a live transaction sees STAGED edits, and
+# the live file stays untouched until commit (the property lscache's safety guard
+# relies on). ---
+TXN_RYW="${TEST_TMP}/txn-ryw"
+mkdir -p "$TXN_RYW"
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_RYW/httpd.conf"
+ryw=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    transaction_start
+    ols_set "$TXN_RYW/httpd.conf" tuning maxConnections 9999
+    # live file still pristine, staged value visible via ols_get
+    live=$(grep -cE "maxConnections[[:space:]]+100" "$TXN_RYW/httpd.conf")
+    staged=$(ols_get "$TXN_RYW/httpd.conf" tuning maxConnections)
+    transaction_commit
+    committed=$(ols_get "$TXN_RYW/httpd.conf" tuning maxConnections)
+    echo "live=${live} staged=${staged} committed=${committed}"
+)
+if [ "$ryw" = "live=1 staged=9999 committed=9999" ]; then
+    log_pass "txn: read-your-writes (staged value visible, live untouched until commit)"
+else
+    log_fail "txn read-your-writes wrong: [$ryw]"
+fi
+
+# Read-your-writes for the env-line variant (ols_set_env / ols_get_env).
+TXN_RYWE="${TEST_TMP}/txn-rywe"
+mkdir -p "$TXN_RYWE"
+printf 'extprocessor lsphp {\n  env PHP_LSAPI_CHILDREN=10\n}\n' > "$TXN_RYWE/httpd.conf"
+rywe=$(
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    transaction_start
+    ols_set_env "$TXN_RYWE/httpd.conf" "extprocessor lsphp" PHP_LSAPI_CHILDREN 40
+    live=$(grep -cE "PHP_LSAPI_CHILDREN=10" "$TXN_RYWE/httpd.conf")
+    staged=$(ols_get_env "$TXN_RYWE/httpd.conf" "extprocessor lsphp" PHP_LSAPI_CHILDREN)
+    transaction_commit
+    committed=$(ols_get_env "$TXN_RYWE/httpd.conf" "extprocessor lsphp" PHP_LSAPI_CHILDREN)
+    echo "live=${live} staged=${staged} committed=${committed}"
+)
+if [ "$rywe" = "live=1 staged=40 committed=40" ]; then
+    log_pass "txn: read-your-writes for ols_set_env/ols_get_env (staged env visible, live untouched)"
+else
+    log_fail "txn env read-your-writes wrong: [$rywe]"
+fi
+
+# --- Integration: a CONFIG-writing feature that stages an edit then FAILS rolls
+# back the whole transaction — the live config is unchanged, no temps survive. ---
+TXN_INT="${TEST_TMP}/txn-int"
+mkdir -p "$TXN_INT"
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_INT/httpd.conf"
+(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
+    LSO_EDITION=ols LSO_PANEL=none LSO_LSWS_ROOT=/x
+    TXN_CONF="$TXN_INT/httpd.conf"
+    resolve_profile_features() { echo "feat_ok feat_cfgbad"; }
+    feature_get_by_alias() { echo "$1"; }
+    feature_exists() { return 0; }
+    feature_get() { echo "$1"; }
+    feature_apply() {
+        if [ "$1" = "feat_ok" ]; then ols_set "$TXN_CONF" tuning maxConnections 9999; return 0; fi
+        # Stages a config edit, THEN fails mid-write -> unsafe partial config.
+        ols_set "$TXN_CONF" tuning enableBr 1; return 1
+    }
+    apply_optimizations "" "" "" auto >/dev/null 2>&1 || true
+)
+if grep -qE "maxConnections[[:space:]]+100" "$TXN_INT/httpd.conf" \
+   && ! grep -qE "maxConnections[[:space:]]+9999" "$TXN_INT/httpd.conf" \
+   && ! grep -qE "enableBr" "$TXN_INT/httpd.conf"; then
+    log_pass "txn integration: config-write failure rolls back ALL staged edits (all-or-nothing)"
+else
+    log_fail "txn integration: config changed despite config-write failure: $(cat "$TXN_INT/httpd.conf")"
+fi
+if [ "$(find "$TXN_INT" \( -name '.lso-txn.*' -o -name '.lso-confedit.*' \) | wc -l | tr -d ' ')" = "0" ]; then
+    log_pass "txn integration: no temps survive a rolled-back run"
+else
+    log_fail "txn integration: temp files left after rollback"
+fi
+
+# --- Integration: a NON-config feature failure (wp-cli/.htaccess/.ini — stages
+# no main config) must NOT discard earlier features' valid staged server config;
+# that config still commits. (The H1 cross-layer-coupling fix.) ---
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_INT/httpd.conf"
+(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
+    LSO_EDITION=ols LSO_PANEL=none LSO_LSWS_ROOT=/x
+    TXN_CONF="$TXN_INT/httpd.conf"
+    resolve_profile_features() { echo "feat_ok feat_nocfgbad"; }
+    feature_get_by_alias() { echo "$1"; }
+    feature_exists() { return 0; }
+    feature_get() { echo "$1"; }
+    feature_apply() {
+        if [ "$1" = "feat_ok" ]; then ols_set "$TXN_CONF" tuning maxConnections 9999; return 0; fi
+        return 1   # fails WITHOUT staging any config (e.g. wp-cli install error)
+    }
+    apply_optimizations "" "" "" auto >/dev/null 2>&1 || true
+)
+if grep -qE "maxConnections[[:space:]]+9999" "$TXN_INT/httpd.conf"; then
+    log_pass "txn integration: non-config feature failure keeps + commits valid server config (no cross-layer rollback)"
+else
+    log_fail "txn integration: non-config failure wrongly discarded server config: $(cat "$TXN_INT/httpd.conf")"
+fi
+
+# --- Integration: a feature whose ols_set write FAILS but which SWALLOWS the
+# error (returns 0) must NOT commit partial config — the write-error counter
+# forces a rollback regardless of the feature's exit status (grok B1). ---
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_INT/httpd.conf"
+(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
+    LSO_EDITION=ols LSO_PANEL=none LSO_LSWS_ROOT=/x
+    TXN_CONF="$TXN_INT/httpd.conf"
+    # Force the .lso-confedit scratch mktemp to fail (simulates disk-full mid-write);
+    # the .lso-txn staging temp still succeeds. Statement-level case (not in $()).
+    secure_mktemp() {
+        if [ "${_LSO_FAIL_SCRATCH:-0}" = 1 ]; then
+            case "$1" in *.lso-confedit.*) return 1 ;; esac
+        fi
+        command mktemp "$1"
+    }
+    resolve_profile_features() { echo "feat_ok feat_swallow"; }
+    feature_get_by_alias() { echo "$1"; }
+    feature_exists() { return 0; }
+    feature_get() { echo "$1"; }
+    feature_apply() {
+        if [ "$1" = "feat_ok" ]; then ols_set "$TXN_CONF" tuning maxConnections 9999; return 0; fi
+        # Real write fails, but the feature swallows it and returns success.
+        _LSO_FAIL_SCRATCH=1
+        ols_set "$TXN_CONF" tuning enableBr 1 || true
+        _LSO_FAIL_SCRATCH=0
+        return 0
+    }
+    apply_optimizations "" "" "" auto >/dev/null 2>&1 || true
+)
+if grep -qE "maxConnections[[:space:]]+100" "$TXN_INT/httpd.conf" \
+   && ! grep -qE "maxConnections[[:space:]]+9999" "$TXN_INT/httpd.conf"; then
+    log_pass "txn integration: swallowed config-write failure still rolls back (no partial commit)"
+else
+    log_fail "txn integration: partial config committed despite swallowed write failure: $(cat "$TXN_INT/httpd.conf")"
+fi
+if [ "$(find "$TXN_INT" \( -name '.lso-txn.*' -o -name '.lso-confedit.*' \) | wc -l | tr -d ' ')" = "0" ]; then
+    log_pass "txn integration: no temps survive a swallowed-failure rollback"
+else
+    log_fail "txn integration: temp files left after swallowed-failure rollback"
+fi
+
+# --- Integration: success path commits ALL features' edits onto the live file
+# (two features editing the SAME file -> staging dedups onto one temp), no temps. ---
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_INT/httpd.conf"
+(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
+    LSO_EDITION=ols LSO_PANEL=none LSO_LSWS_ROOT=/x
+    TXN_CONF="$TXN_INT/httpd.conf"
+    resolve_profile_features() { echo "feat_one feat_two"; }
+    feature_get_by_alias() { echo "$1"; }
+    feature_exists() { return 0; }
+    feature_get() { echo "$1"; }
+    feature_apply() {
+        if [ "$1" = "feat_one" ]; then ols_set "$TXN_CONF" tuning maxConnections 9999; return 0; fi
+        ols_set "$TXN_CONF" tuning enableBr 1; return 0
+    }
+    apply_optimizations "" "" "" auto >/dev/null 2>&1 || true
+)
+if grep -qE "maxConnections[[:space:]]+9999" "$TXN_INT/httpd.conf" \
+   && grep -qE "enableBr[[:space:]]+1" "$TXN_INT/httpd.conf"; then
+    log_pass "txn integration: success commits all features' edits (same-file dedup)"
+else
+    log_fail "txn integration: edits missing after commit: $(cat "$TXN_INT/httpd.conf")"
+fi
+if [ "$(find "$TXN_INT" \( -name '.lso-txn.*' -o -name '.lso-confedit.*' \) | wc -l | tr -d ' ')" = "0" ]; then
+    log_pass "txn integration: no temps survive a committed run"
+else
+    log_fail "txn integration: temp files left after commit"
+fi
+
 ################################################################################
 # SECTION 9b: json_escape helper
 ################################################################################

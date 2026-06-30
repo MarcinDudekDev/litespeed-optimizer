@@ -98,6 +98,26 @@ apply_optimizations() {
 
     local applied=0 failed=0 skipped=0
     local fid
+
+    # Atomic SERVER-CONFIG edits: every confedit (ols_set/ols_set_env) write is
+    # staged to a per-file temp and committed together at the end, so a broken
+    # half-applied server config can never reach disk (the EXIT trap also rolls
+    # back on an abort/crash).
+    #
+    # Rollback is scoped to CONFIG failures, not every feature failure: if a
+    # feature stages main-config edits and then fails mid-write, its partial edit
+    # is unsafe -> roll back the whole transaction and abort. But a feature that
+    # writes NO main config (LSCWP/Woo via wp-cli, opcache .ini, per-site
+    # .htaccess) failing must NOT discard the already-valid server config staged
+    # by earlier features (those side effects are non-transactional and aren't
+    # undone anyway) — its failure is recorded and the run continues; the staged
+    # config still commits. Skipped under DRY_RUN and when the engine isn't loaded.
+    local _txn_active=false
+    if [ "${DRY_RUN:-false}" != true ] && type -t transaction_start >/dev/null 2>&1; then
+        transaction_start
+        _txn_active=true
+    fi
+
     for fid in $features; do
         if [ -n "$exclude_id" ] && [ "$fid" = "$exclude_id" ]; then
             log_info "Skipping (excluded): $fid"
@@ -129,14 +149,58 @@ apply_optimizations() {
         [ -z "$display" ] && display="$fid"
         log_info "Applying: $display"
 
-        if feature_apply "$fid" "$target_site"; then
+        # Snapshot per-feature write + write-error counters. (A file-count delta
+        # can't attribute writes — every server-config feature edits the same
+        # httpd_config and dedups onto one staged temp; the counters rise per edit.)
+        local _writes_before=0 _werrs_before=0
+        if [ "$_txn_active" = true ]; then
+            _writes_before=${TRANSACTION_WRITES:-0}
+            _werrs_before=${TRANSACTION_WRITE_ERRORS:-0}
+        fi
+
+        local _feat_ok=true
+        feature_apply "$fid" "$target_site" || _feat_ok=false
+
+        # A confedit write can FAIL while the feature still returns success — errexit
+        # is off inside this `if`/`||` context, so a feature may not propagate it.
+        # Detect it directly via the write-error counter so partial config can't commit.
+        local _cfg_write_failed=false
+        if [ "$_txn_active" = true ] && [ "${TRANSACTION_WRITE_ERRORS:-0}" -gt "$_werrs_before" ]; then
+            _cfg_write_failed=true
+        fi
+
+        if [ "$_feat_ok" = true ] && [ "$_cfg_write_failed" = false ]; then
             applied=$((applied + 1))
             log_success "$display done"
         else
             failed=$((failed + 1))
-            log_error "$display FAILED"
+            if [ "$_cfg_write_failed" = true ]; then
+                log_error "$display: a server-config write FAILED"
+            else
+                log_error "$display FAILED"
+            fi
+            # Roll back + abort only when this feature TOUCHED the server config —
+            # either a write physically failed, or the feature failed after writing
+            # config (its partial/guard-rejected config is unsafe). A non-config
+            # failure (no staged writes) keeps earlier features' valid config, which
+            # still commits below.
+            if [ "$_txn_active" = true ] && \
+               { [ "$_cfg_write_failed" = true ] || [ "${TRANSACTION_WRITES:-0}" -gt "$_writes_before" ]; }; then
+                log_error "Rolling back staged server config ($display) — config left unchanged."
+                transaction_rollback
+                _txn_active=false
+                break
+            fi
         fi
     done
+
+    # Commit the staged server-config edits: control reaches here only when no
+    # config-writing feature failed mid-write (those abort + roll back above), so
+    # every staged edit is from a feature that completed its config writes.
+    if [ "$_txn_active" = true ]; then
+        transaction_commit
+        _txn_active=false
+    fi
 
     echo ""
     if [ "${DRY_RUN:-false}" = true ]; then
