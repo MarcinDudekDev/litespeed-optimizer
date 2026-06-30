@@ -1470,6 +1470,49 @@ else
     log_fail "security: ModSec note missing"
 fi
 
+# Bad-bot blocker is OPT-IN: the default security runs above (no --badbots) must
+# NOT have written a badbots block.
+if grep -q "# BEGIN litespeed-optimizer badbots" "$SEC_HT" 2>/dev/null; then
+    log_fail "security: bad-bot block written WITHOUT --badbots (should be opt-in)"
+else
+    log_pass "security: bad-bot blocker is opt-in (absent by default)"
+fi
+
+# With --badbots, the per-site .htaccess gains a marker-delimited UA denylist
+# with the dual authz syntax (2.4 mod_authz_core + 2.2 access_compat fallback).
+sec_bb_out=$(LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --badbots --force 2>&1 || true)
+if grep -q "# BEGIN litespeed-optimizer badbots" "$SEC_HT" 2>/dev/null \
+    && grep -q 'BrowserMatchNoCase "AhrefsBot" lso_bad_bot' "$SEC_HT" 2>/dev/null \
+    && grep -q "Require not env lso_bad_bot" "$SEC_HT" 2>/dev/null \
+    && grep -q "Deny from env=lso_bad_bot" "$SEC_HT" 2>/dev/null; then
+    log_pass "security: --badbots deploys UA denylist with dual authz syntax"
+else
+    log_fail "security: --badbots block missing or malformed"
+fi
+# Major search engines must NOT be in the denylist (conservative list).
+if grep -qiE 'BrowserMatchNoCase "(Googlebot|Bingbot|DuckDuckBot)"' "$SEC_HT" 2>/dev/null; then
+    log_fail "security: bad-bot list wrongly includes a major search engine"
+else
+    log_pass "security: bad-bot list excludes major search engines (no false positives)"
+fi
+# Idempotent: a second --badbots apply must not duplicate the block.
+LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$SEC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --badbots --force >/dev/null 2>&1 || true
+if [ "$(grep -c "# BEGIN litespeed-optimizer badbots" "$SEC_HT" 2>/dev/null)" = "1" ]; then
+    log_pass "security: bad-bot block is idempotent (no duplication on re-apply)"
+else
+    log_fail "security: bad-bot block duplicated on re-apply"
+fi
+# The headers block must still be present and un-duplicated alongside badbots.
+if [ "$(grep -c "# BEGIN litespeed-optimizer headers" "$SEC_HT" 2>/dev/null)" = "1" ]; then
+    log_pass "security: headers + badbots blocks coexist (single headers block)"
+else
+    log_fail "security: headers block disturbed by badbots apply"
+fi
+
 # Enterprise: WordPressProtect via include
 SEC_ENT_FIX="${TEST_TMP}/sec-ent-fix"
 SEC_ENT_DATA="${TEST_TMP}/sec-ent-data"
@@ -1528,6 +1571,26 @@ if [ -n "$score_after" ] && [ "$score_after" -ge 90 ]; then
     log_pass "tuned box scores >= 90 (${score_after})"
 else
     log_fail "tuned box scores below 90 (${score_after:-?})"
+fi
+
+# Bad-bot blocker audit: the default optimize above did NOT pass --badbots, so
+# analyze should emit the opt-in advisory NOTE (warn, non-scoring), not a pass.
+if echo "$az_after" | grep -qi "bad-bot UA blocker not deployed"; then
+    log_pass "analyze: bad-bot blocker absence surfaced as advisory NOTE"
+else
+    log_fail "analyze: bad-bot advisory NOTE missing"
+fi
+# After an explicit --badbots optimize, analyze must report it deployed (pass).
+LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature security --badbots --force --quiet >/dev/null 2>&1 || true
+az_bb=$(LSO_DATA_DIR="$AZ_DATA" LSO_FS_ROOT="$AZ_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$AZ_FIX/etc/php.d" LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" analyze 2>&1 || true)
+if echo "$az_bb" | grep -qi "bad-bot UA blocker deployed"; then
+    log_pass "analyze: deployed bad-bot blocker detected (pass)"
+else
+    log_fail "analyze: deployed bad-bot blocker not detected"
 fi
 
 # Danger finding caps score at 59: force enableCache 1 server-wide
@@ -1692,6 +1755,12 @@ class H(http.server.BaseHTTPRequestHandler):
         body = b"<html>ok</html>"
         hdrs = {"Server": "LiteSpeed", "Content-Type": "text/html"}
         cookie = self.headers.get("Cookie", "")
+        # A well-configured ("good") site blocks known scrapers by UA -> 403.
+        if MODE == "good" and "AhrefsBot" in self.headers.get("User-Agent", ""):
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if MODE == "good":
             hdrs["alt-svc"] = 'h3=":443"; ma=2592000'
             hdrs["x-content-type-options"] = "nosniff"
@@ -1752,6 +1821,12 @@ PYEOF
         log_pass "remote analyze: good mock site scores >= 85 (${rm_score})"
     else
         log_fail "remote analyze good-site score wrong: ${rm_score:-none}: $(echo "$rm_out" | tail -3)"
+    fi
+    # Bad-bot active probe: the good mock 403s the scraper UA -> detected as blocked.
+    if echo "$rm_out" | grep -qi "scraper UA blocked (HTTP 403)"; then
+        log_pass "remote analyze: bad-bot UA probe detects 403 block"
+    else
+        log_fail "remote analyze: bad-bot probe did not detect the 403"
     fi
     if echo "$rm_out" | grep -q "homepage cached"; then
         log_pass "remote: repeat-request cache hit detected"

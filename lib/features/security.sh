@@ -113,6 +113,80 @@ _sec_apply_headers() {
     done
 }
 
+# Curated, CONSERVATIVE bad-bot User-Agent denylist. Deliberately excludes every
+# major search engine (Googlebot, Bingbot, DuckDuckBot, Applebot, YandexBot,
+# Baiduspider) and social unfurlers. It targets aggressive commercial SEO
+# scrapers that generate real load, AI training crawlers, and obvious
+# vulnerability scanners — the UAs site owners most often want gone. Because the
+# whole blocker is OPT-IN (--badbots / LSO_BADBOTS=1), enabling it is a
+# deliberate choice. BrowserMatchNoCase matches each token as a case-insensitive
+# REGEX against the UA; every entry here is a plain alnum crawler name with no
+# regex metacharacters, so each behaves as a simple substring match.
+_SEC_BADBOTS="AhrefsBot SemrushBot MJ12bot DotBot BLEXBot PetalBot Bytespider \
+DataForSeoBot MegaIndex ZoominfoBot serpstatbot MauiBot magpie-crawler \
+GPTBot CCBot ClaudeBot Nikto sqlmap ZmEu WPScan masscan zgrab"
+
+# Deploy a per-site .htaccess bad-bot UA denylist. Same marker-delimited,
+# idempotent, atomic pattern as _sec_apply_headers_site. Emits dual authz syntax
+# so it works on both Apache 2.4 (mod_authz_core) and 2.2 (mod_access_compat)
+# emulation under LiteSpeed.
+_sec_apply_badbots_site() {
+    local docroot="$1"
+    local htaccess="${docroot%/}/.htaccess"
+
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] Would deploy bad-bot UA blocker to ${htaccess}"
+        return 0
+    fi
+
+    touch "$htaccess" 2>/dev/null || { log_warn "Cannot write ${htaccess} — skipping bad-bot blocker"; return 0; }
+
+    local tmp
+    tmp=$(secure_mktemp "${docroot%/}/.lso-bot.XXXXXX") || return 1
+    # Strip any prior block, then append a fresh one (idempotent + updatable).
+    awk '
+        /^# BEGIN litespeed-optimizer badbots/ { skip = 1; next }
+        /^# END litespeed-optimizer badbots/ { skip = 0; next }
+        !skip { print }
+    ' "$htaccess" > "$tmp"
+    {
+        echo "# BEGIN litespeed-optimizer badbots"
+        echo "<IfModule mod_setenvif.c>"
+        local bot
+        for bot in $_SEC_BADBOTS; do
+            echo "BrowserMatchNoCase \"${bot}\" lso_bad_bot"
+        done
+        echo "<IfModule mod_authz_core.c>"
+        echo "<RequireAll>"
+        echo "Require all granted"
+        echo "Require not env lso_bad_bot"
+        echo "</RequireAll>"
+        echo "</IfModule>"
+        echo "<IfModule !mod_authz_core.c>"
+        echo "Order Allow,Deny"
+        echo "Allow from all"
+        echo "Deny from env=lso_bad_bot"
+        echo "</IfModule>"
+        echo "</IfModule>"
+        echo "# END litespeed-optimizer badbots"
+    } >> "$tmp"
+    copy_file_permissions "$htaccess" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$htaccess"
+    log_info "Deployed bad-bot UA blocker to ${htaccess}"
+}
+
+_sec_apply_badbots() {
+    if [ -z "${LSO_WP_SITES+x}" ] || [ "${#LSO_WP_SITES[@]}" -eq 0 ]; then
+        log_warn "bad-bot blocker: no WordPress sites detected — skipping (.htaccess is per-site)"
+        return 0
+    fi
+    local docroot
+    for docroot in "${LSO_WP_SITES[@]}"; do
+        [ -d "$docroot" ] || continue
+        _sec_apply_badbots_site "$docroot"
+    done
+}
+
 _sec_report_recaptcha() {
     log_info "reCAPTCHA protection: report-only (requires your site keys)"
     echo "  To enable: WebAdmin > Security > CAPTCHA (lsrecaptcha)"
@@ -154,6 +228,13 @@ feature_apply_custom_security() {
     # Security response headers (per-site .htaccess) — makes the `headers` alias
     # truthful and satisfies the remote audit's missing-header findings.
     _sec_apply_headers
+
+    # Bad-bot UA blocker (per-site .htaccess) — OPT-IN only (--badbots /
+    # LSO_BADBOTS=1). It denies known scrapers/scanners; gating it keeps the
+    # default run from surprising anyone whose traffic mix wants those crawlers.
+    if [ "${LSO_BADBOTS:-}" = "1" ]; then
+        _sec_apply_badbots
+    fi
 
     _sec_report_recaptcha
     _sec_report_modsec

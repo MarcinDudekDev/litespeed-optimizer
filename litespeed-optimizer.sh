@@ -284,7 +284,8 @@ COMMANDS:
                                 clients import via wp-admin > LiteSpeed Cache >
                                 Toolbox > Import (no SSH needed); --profile,
                                 --out <file>, --with-readme
-    optimize [site]             Apply optimizations (Phase 2+)
+    optimize [site]             Apply optimizations (Phase 2+); --badbots adds
+                                an opt-in bad-bot .htaccess UA denylist
     rollback <timestamp>        Restore backup, restart, verify
     rollback --list             List available backups
     status [site]               Show which optimizations are applied
@@ -317,6 +318,8 @@ OPTIONS:
                                 requests (for staging behind a Basic Auth gate)
     --with-readme               export-profile: also write a companion .README.md
                                 with import + verification steps (default: off)
+    --badbots                   security: also deploy an opt-in bad-bot UA
+                                denylist to each site's .htaccess (default: off)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -763,6 +766,10 @@ parse_arguments() {
                 ;;
             --with-readme)
                 export LSO_EXPORT_README=1
+                shift
+                ;;
+            --badbots)
+                export LSO_BADBOTS=1
                 shift
                 ;;
             --profile)
