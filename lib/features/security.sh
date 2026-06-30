@@ -157,15 +157,34 @@ _sec_apply_badbots_site() {
             echo "BrowserMatchNoCase \"${bot}\" lso_bad_bot"
         done
         echo "<IfModule mod_authz_core.c>"
-        echo "<RequireAll>"
-        echo "Require all granted"
-        echo "Require not env lso_bad_bot"
-        echo "</RequireAll>"
+        if [ -n "${LSO_TRUSTED_IPS:-}" ]; then
+            # Trusted IPs bypass the UA deny entirely (RequireAny: trusted OR not-a-bot).
+            echo "<RequireAny>"
+            echo "Require ip ${LSO_TRUSTED_IPS}"
+            echo "<RequireAll>"
+            echo "Require all granted"
+            echo "Require not env lso_bad_bot"
+            echo "</RequireAll>"
+            echo "</RequireAny>"
+        else
+            echo "<RequireAll>"
+            echo "Require all granted"
+            echo "Require not env lso_bad_bot"
+            echo "</RequireAll>"
+        fi
         echo "</IfModule>"
         echo "<IfModule !mod_authz_core.c>"
-        echo "Order Allow,Deny"
-        echo "Allow from all"
-        echo "Deny from env=lso_bad_bot"
+        if [ -n "${LSO_TRUSTED_IPS:-}" ]; then
+            # Order Deny,Allow: Allow is evaluated last and wins, so a trusted IP is
+            # served even if its UA matched the bad-bot denylist.
+            echo "Order Deny,Allow"
+            echo "Deny from env=lso_bad_bot"
+            echo "Allow from ${LSO_TRUSTED_IPS}"
+        else
+            echo "Order Allow,Deny"
+            echo "Allow from all"
+            echo "Deny from env=lso_bad_bot"
+        fi
         echo "</IfModule>"
         echo "</IfModule>"
         echo "# END litespeed-optimizer badbots"
