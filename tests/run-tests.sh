@@ -594,6 +594,12 @@ BK_FIXTURE="${TEST_TMP}/bk-fixture"
 mkdir -p "$BK_FIXTURE"
 cp -R "${CONFIGS_DIR}/plain-ols/." "$BK_FIXTURE/"
 
+# fail2ban state lives OUTSIDE the conf tree (Prereq B): seed a jail.local + a
+# custom filter so the backup/restore must cover /etc/fail2ban.
+mkdir -p "$BK_FIXTURE/etc/fail2ban/jail.d" "$BK_FIXTURE/etc/fail2ban/filter.d"
+printf '[wordpress]\nenabled = true\nmaxretry = 5\n' > "$BK_FIXTURE/etc/fail2ban/jail.local"
+printf '[Definition]\nfailregex = ^<HOST> .*wp-login\n' > "$BK_FIXTURE/etc/fail2ban/filter.d/lso-wp.conf"
+
 # Snapshot of pristine state for the final diff
 PRISTINE="${TEST_TMP}/pristine"
 mkdir -p "$PRISTINE"
@@ -654,11 +660,20 @@ if find "${LSO_DATA_DIR}/backups/${backup_ts}/htaccess" -name ".htaccess" 2>/dev
 else
     log_fail "backup missing site .htaccess"
 fi
+# Prereq B: fail2ban state (outside the conf tree) must be captured.
+if [ -f "${LSO_DATA_DIR}/backups/${backup_ts}/fail2ban/jail.local" ] \
+    && [ -f "${LSO_DATA_DIR}/backups/${backup_ts}/fail2ban/filter.d/lso-wp.conf" ]; then
+    log_pass "backup captures /etc/fail2ban (jail.local + custom filter)"
+else
+    log_fail "backup missing /etc/fail2ban"
+fi
 
-# 2. Corrupt the live config + htaccess
+# 2. Corrupt the live config + htaccess + fail2ban jail
 echo "GARBAGE { broken" >> "$BK_FIXTURE/usr/local/lsws/conf/httpd_config.conf"
 echo "CORRUPTED" > "$BK_FIXTURE/home/example.com/public_html/.htaccess"
 rm -f "$BK_FIXTURE/usr/local/lsws/conf/vhosts/example/vhconf.conf"
+echo "maxretry = 999  # tampered" >> "$BK_FIXTURE/etc/fail2ban/jail.local"
+rm -f "$BK_FIXTURE/etc/fail2ban/filter.d/lso-wp.conf"
 
 # 3. Restore
 if run_backup_env restore_backup_files "${LSO_DATA_DIR}/backups/${backup_ts}" >/dev/null 2>&1; then
@@ -676,6 +691,14 @@ if diff "$PRISTINE/home/example.com/public_html/.htaccess" "$BK_FIXTURE/home/exa
     log_pass ".htaccess restored to pristine"
 else
     log_fail ".htaccess differs after rollback"
+fi
+# Prereq B: fail2ban tree restored to pristine (tampered jail reverted, deleted
+# filter recreated by the --delete rsync).
+if diff -r "$PRISTINE/etc/fail2ban" "$BK_FIXTURE/etc/fail2ban" >/dev/null 2>&1; then
+    log_pass "fail2ban tree restored to pristine after rollback (tamper reverted, filter recreated)"
+else
+    log_fail "fail2ban tree differs after rollback"
+    diff -r "$PRISTINE/etc/fail2ban" "$BK_FIXTURE/etc/fail2ban" 2>&1 | head -5
 fi
 
 # 4. Checksum verification reports clean

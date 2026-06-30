@@ -8,8 +8,12 @@
 #   ├── lsws-conf/          rsync -a $LSO_LSWS_ROOT/conf/  (main+vhosts, OLS & LSWS)
 #   ├── apache-includes/    cPanel: /etc/apache2/conf.d/includes/
 #   ├── htaccess/<site>/    .htaccess of each detected WP site
-#   ├── php/  redis/  mariadb/  sysctl/  systemd/   (when present)
+#   ├── php/  redis/  mariadb/  sysctl/  systemd/  fail2ban/   (when present)
 #   └── lscwp/<site>.json   wp litespeed-option export (Phase 3)
+#
+# ModSec/CRS config lives under $LSO_LSWS_ROOT/conf/owasp and is covered by
+# lsws-conf. fail2ban (/etc/fail2ban) is outside the conf tree so it is captured
+# separately. apt PACKAGES are not part of a backup — rollback restores config.
 #
 # All source paths honor LSO_FS_ROOT so the whole module is testable against
 # fixture trees.
@@ -94,9 +98,15 @@ create_backup() {
         cp -a "$LSO_PHP_INI" "${CURRENT_BACKUP_DIR}/php/" 2>/dev/null || log_warn "Could not backup $LSO_PHP_INI"
     fi
 
-    # 5. Redis / MariaDB / sysctl / systemd drop-ins (when present; non-critical)
+    # 5. Redis / MariaDB / sysctl / systemd / fail2ban drop-ins (when present;
+    # non-critical). fail2ban state (jail.local, jail.d, filter.d) lives OUTSIDE
+    # the LSWS conf tree, so without this a bad jail from the fail2ban feature
+    # would survive a conf-tree-only rollback. (The ModSec/CRS tree, by contrast,
+    # lives under ${LSO_LSWS_ROOT}/conf/owasp and is already captured by the
+    # lsws-conf backup above. apt-installed PACKAGES — ols-modsecurity, fail2ban
+    # — are NOT rolled back; rollback restores config, not package state.)
     local src dst
-    for src in /etc/redis /etc/mysql/mariadb.conf.d /etc/my.cnf.d /etc/sysctl.d /etc/systemd/system/lsws.service.d; do
+    for src in /etc/redis /etc/mysql/mariadb.conf.d /etc/my.cnf.d /etc/sysctl.d /etc/systemd/system/lsws.service.d /etc/fail2ban; do
         local real_src
         real_src="$(_bk_fs "$src")"
         [ -d "$real_src" ] || continue
@@ -104,6 +114,7 @@ create_backup() {
             /etc/redis)            dst="redis" ;;
             /etc/mysql/*|/etc/my.cnf.d) dst="mariadb" ;;
             /etc/sysctl.d)         dst="sysctl" ;;
+            /etc/fail2ban)         dst="fail2ban" ;;
             *)                     dst="systemd" ;;
         esac
         mkdir -p "${CURRENT_BACKUP_DIR}/${dst}"
@@ -268,6 +279,17 @@ restore_backup_files() {
             rsync -a --delete "$backup_path/mariadb/" "$(_bk_fs /etc/mysql/mariadb.conf.d)/"
         elif [ -d "$(_bk_fs /etc/my.cnf.d)" ]; then
             rsync -a --delete "$backup_path/mariadb/" "$(_bk_fs /etc/my.cnf.d)/"
+        fi
+    fi
+    if [ -d "$backup_path/fail2ban" ] && [ -d "$(_bk_fs /etc/fail2ban)" ]; then
+        log_info "Restoring /etc/fail2ban ..."
+        rsync -a --delete "$backup_path/fail2ban/" "$(_bk_fs /etc/fail2ban)/"
+        # Activate the restored jails (best-effort; real box only). Without a
+        # reload the restored config sits on disk while fail2ban keeps running the
+        # bad jail. Skipped in fixture mode (no daemon, and we never touch /etc).
+        if [ -z "${LSO_FS_ROOT:-}" ] && command -v fail2ban-client >/dev/null 2>&1; then
+            fail2ban-client reload >/dev/null 2>&1 \
+                || log_warn "fail2ban config restored but reload failed — run 'fail2ban-client reload' manually"
         fi
     fi
 
