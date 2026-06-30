@@ -99,6 +99,13 @@ run_export_profile() {
 
     log_success "Exported: $out ($(grep -c '^\[' "$out") settings, profile: ${profile})"
 
+    # Companion README is opt-in (--with-readme / LSO_EXPORT_README=1) so the
+    # default export is just the single .data file.
+    if [ "${LSO_EXPORT_README:-}" != "1" ]; then
+        log_info "Import via wp-admin > LiteSpeed Cache > Toolbox > Import / Export (pass --with-readme for step-by-step notes)"
+        return 0
+    fi
+
     # Companion README with import + verification steps
     local readme="${out%.data}.README.md"
     cat > "$readme" <<EOF

@@ -69,8 +69,10 @@ _lscwp_render_profile() {
     local object=0 obj_host=127.0.0.1 obj_port=6379
     if [ "${LSO_HAS_REDIS:-false}" = true ]; then
         object=1
-        if [ -S /var/run/redis/redis.sock ]; then
-            obj_host=/var/run/redis/redis.sock
+        local redis_sock
+        redis_sock=$(_lso_fs /var/run/redis/redis.sock)
+        if [ -S "$redis_sock" ]; then
+            obj_host=$redis_sock
             obj_port=0
         fi
     fi

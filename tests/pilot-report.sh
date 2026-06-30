@@ -208,9 +208,9 @@ OPcache raised from the live 128MB (100% full, ~69% hit-rate) to measure headroo
 The client's production host has no SSH. Deliver the fix via the generated
 LSCWP import file:
 
-1. Send \`docs/mltools-woocommerce-profile.data\` (+ its README) to the client
-   or import it yourself through wp-admin > **LiteSpeed Cache > Toolbox >
-   Import / Export**.
+1. Send \`docs/mltools-woocommerce-profile.data\` (+ its README, if generated
+   with \`--with-readme\`) to the client or import it yourself through wp-admin >
+   **LiteSpeed Cache > Toolbox > Import / Export**.
 2. It sets \`cache-rest = 0\` (closes the cart-API finding) plus the full safe
    WooCommerce profile.
 3. Re-run \`litespeed-optimizer analyze --remote https://mltools.pl\` to confirm

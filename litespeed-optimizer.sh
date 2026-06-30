@@ -283,7 +283,7 @@ COMMANDS:
     export-profile              Generate an LSCWP settings file (.data) that
                                 clients import via wp-admin > LiteSpeed Cache >
                                 Toolbox > Import (no SSH needed); --profile,
-                                --out <file>
+                                --out <file>, --with-readme
     optimize [site]             Apply optimizations (Phase 2+)
     rollback <timestamp>        Restore backup, restart, verify
     rollback --list             List available backups
@@ -315,6 +315,8 @@ OPTIONS:
     --json                      Output JSON (detect, status commands)
     --basic-auth <user:pass>    Send HTTP Basic Auth on remote/benchmark/probe-redis
                                 requests (for staging behind a Basic Auth gate)
+    --with-readme               export-profile: also write a companion .README.md
+                                with import + verification steps (default: off)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -757,6 +759,10 @@ parse_arguments() {
                 ;;
             --list)
                 LIST_MODE=true
+                shift
+                ;;
+            --with-readme)
+                export LSO_EXPORT_README=1
                 shift
                 ;;
             --profile)
