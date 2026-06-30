@@ -802,6 +802,55 @@ else
     log_fail "txn integration: non-config failure wrongly discarded server config: $(cat "$TXN_INT/httpd.conf")"
 fi
 
+# --- Integration: a feature whose ols_set write FAILS but which SWALLOWS the
+# error (returns 0) must NOT commit partial config — the write-error counter
+# forces a rollback regardless of the feature's exit status (grok B1). ---
+printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_INT/httpd.conf"
+(
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }
+    log_error() { echo "[ERROR] $*" >&2; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/helpers.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/optimizer.sh"
+    LSO_EDITION=ols LSO_PANEL=none LSO_LSWS_ROOT=/x
+    TXN_CONF="$TXN_INT/httpd.conf"
+    # Force the .lso-confedit scratch mktemp to fail (simulates disk-full mid-write);
+    # the .lso-txn staging temp still succeeds. Statement-level case (not in $()).
+    secure_mktemp() {
+        if [ "${_LSO_FAIL_SCRATCH:-0}" = 1 ]; then
+            case "$1" in *.lso-confedit.*) return 1 ;; esac
+        fi
+        command mktemp "$1"
+    }
+    resolve_profile_features() { echo "feat_ok feat_swallow"; }
+    feature_get_by_alias() { echo "$1"; }
+    feature_exists() { return 0; }
+    feature_get() { echo "$1"; }
+    feature_apply() {
+        if [ "$1" = "feat_ok" ]; then ols_set "$TXN_CONF" tuning maxConnections 9999; return 0; fi
+        # Real write fails, but the feature swallows it and returns success.
+        _LSO_FAIL_SCRATCH=1
+        ols_set "$TXN_CONF" tuning enableBr 1 || true
+        _LSO_FAIL_SCRATCH=0
+        return 0
+    }
+    apply_optimizations "" "" "" auto >/dev/null 2>&1 || true
+)
+if grep -qE "maxConnections[[:space:]]+100" "$TXN_INT/httpd.conf" \
+   && ! grep -qE "maxConnections[[:space:]]+9999" "$TXN_INT/httpd.conf"; then
+    log_pass "txn integration: swallowed config-write failure still rolls back (no partial commit)"
+else
+    log_fail "txn integration: partial config committed despite swallowed write failure: $(cat "$TXN_INT/httpd.conf")"
+fi
+if [ "$(find "$TXN_INT" \( -name '.lso-txn.*' -o -name '.lso-confedit.*' \) | wc -l | tr -d ' ')" = "0" ]; then
+    log_pass "txn integration: no temps survive a swallowed-failure rollback"
+else
+    log_fail "txn integration: temp files left after swallowed-failure rollback"
+fi
+
 # --- Integration: success path commits ALL features' edits onto the live file
 # (two features editing the SAME file -> staging dedups onto one temp), no temps. ---
 printf 'tuning {\n  maxConnections 100\n}\n' > "$TXN_INT/httpd.conf"

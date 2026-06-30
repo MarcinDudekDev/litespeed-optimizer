@@ -271,6 +271,13 @@ TRANSACTION_ACTIVE=false
 # same-file dedup).
 # shellcheck disable=SC2034  # mutated in confedit.sh (_confedit_route), read in optimizer.sh
 TRANSACTION_WRITES=0
+# Count of FAILED staged confedit writes this transaction (secure_mktemp/awk/mv
+# failure inside ols_set/ols_set_env). The optimize loop checks this AFTER each
+# feature even when feature_apply returned 0 — a feature can swallow a write
+# failure (errexit is off inside `if feature_apply`), and committing its partial
+# config would be worse than a false rollback.
+# shellcheck disable=SC2034  # mutated in confedit.sh, read in optimizer.sh
+TRANSACTION_WRITE_ERRORS=0
 
 # Start transaction: prepare to modify multiple files atomically
 transaction_start() {
@@ -278,6 +285,8 @@ transaction_start() {
     TRANSACTION_TEMPS=()
     # shellcheck disable=SC2034  # read cross-file in confedit.sh/optimizer.sh
     TRANSACTION_WRITES=0
+    # shellcheck disable=SC2034  # read cross-file in confedit.sh/optimizer.sh
+    TRANSACTION_WRITE_ERRORS=0
     TRANSACTION_ACTIVE=true
 }
 

@@ -89,6 +89,17 @@ ols_get() {
 # via bash dynamic scoping — the caller must `local _CE_SRC _CE_DEST` first.
 # Returns 1 if staging fails. MUST be called statement-level (transaction_stage
 # mutates module arrays — never inside $(...)).
+# Record a confedit WRITE failure under an active transaction so the optimize
+# loop rolls back even when the calling feature swallows the error (errexit is
+# off inside `if feature_apply ...`, so a failed ols_set won't fail the feature).
+# Returns 1 so it can tail a failure path: `... || { _confedit_fail; return 1; }`.
+_confedit_fail() {
+    if [ "${TRANSACTION_ACTIVE:-false}" = true ]; then
+        TRANSACTION_WRITE_ERRORS=$(( ${TRANSACTION_WRITE_ERRORS:-0} + 1 ))
+    fi
+    return 1
+}
+
 _confedit_route() {
     local file="$1"
     if [ "${TRANSACTION_ACTIVE:-false}" = true ] && type -t transaction_stage >/dev/null 2>&1; then
@@ -116,10 +127,10 @@ ols_set() {
     [ -f "$file" ] || return 1
 
     local _CE_SRC _CE_DEST
-    _confedit_route "$file" || return 1
+    _confedit_route "$file" || { _confedit_fail; return 1; }
 
     local tmp
-    tmp=$(secure_mktemp "$(dirname "$_CE_DEST")/.lso-confedit.XXXXXX") || return 1
+    tmp=$(secure_mktemp "$(dirname "$_CE_DEST")/.lso-confedit.XXXXXX") || { _confedit_fail; return 1; }
 
     awk -v block="$block" -v key="$key" -v value="$value" '
         BEGIN { done = 0; inblock = 0; depth = 0 }
@@ -173,11 +184,11 @@ ols_set() {
                 print "}"
             }
         }
-    ' "$_CE_SRC" > "$tmp" || { rm -f "$tmp"; return 1; }
+    ' "$_CE_SRC" > "$tmp" || { rm -f "$tmp"; _confedit_fail; return 1; }
 
     copy_file_permissions "$_CE_SRC" "$tmp" 2>/dev/null || true
     copy_file_ownership "$_CE_SRC" "$tmp" 2>/dev/null || true
-    mv "$tmp" "$_CE_DEST"
+    mv "$tmp" "$_CE_DEST" || { _confedit_fail; return 1; }
 }
 
 # ols_ensure_include <file> <include-path>
@@ -326,10 +337,10 @@ ols_set_env() {
     [ -f "$file" ] || return 1
 
     local _CE_SRC _CE_DEST
-    _confedit_route "$file" || return 1
+    _confedit_route "$file" || { _confedit_fail; return 1; }
 
     local tmp
-    tmp=$(secure_mktemp "$(dirname "$_CE_DEST")/.lso-confedit.XXXXXX") || return 1
+    tmp=$(secure_mktemp "$(dirname "$_CE_DEST")/.lso-confedit.XXXXXX") || { _confedit_fail; return 1; }
 
     awk -v block="$block" -v var="$var" -v value="$value" '
         BEGIN { done = 0; inblock = 0; depth = 0 }
@@ -384,11 +395,11 @@ ols_set_env() {
                 print "}"
             }
         }
-    ' "$_CE_SRC" > "$tmp" || { rm -f "$tmp"; return 1; }
+    ' "$_CE_SRC" > "$tmp" || { rm -f "$tmp"; _confedit_fail; return 1; }
 
     copy_file_permissions "$_CE_SRC" "$tmp" 2>/dev/null || true
     copy_file_ownership "$_CE_SRC" "$tmp" 2>/dev/null || true
-    mv "$tmp" "$_CE_DEST"
+    mv "$tmp" "$_CE_DEST" || { _confedit_fail; return 1; }
 }
 
 ################################################################################

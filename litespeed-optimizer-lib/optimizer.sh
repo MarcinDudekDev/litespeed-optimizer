@@ -149,25 +149,44 @@ apply_optimizations() {
         [ -z "$display" ] && display="$fid"
         log_info "Applying: $display"
 
-        # Snapshot the staged-WRITE count before this feature so that, on failure,
-        # we can tell whether it actually wrote server config. (A file-count delta
-        # can't tell — every server-config feature edits the same httpd_config and
-        # dedups onto one staged temp; the write counter still rises per edit.)
-        local _writes_before=0
-        [ "$_txn_active" = true ] && _writes_before=${TRANSACTION_WRITES:-0}
+        # Snapshot per-feature write + write-error counters. (A file-count delta
+        # can't attribute writes — every server-config feature edits the same
+        # httpd_config and dedups onto one staged temp; the counters rise per edit.)
+        local _writes_before=0 _werrs_before=0
+        if [ "$_txn_active" = true ]; then
+            _writes_before=${TRANSACTION_WRITES:-0}
+            _werrs_before=${TRANSACTION_WRITE_ERRORS:-0}
+        fi
 
-        if feature_apply "$fid" "$target_site"; then
+        local _feat_ok=true
+        feature_apply "$fid" "$target_site" || _feat_ok=false
+
+        # A confedit write can FAIL while the feature still returns success — errexit
+        # is off inside this `if`/`||` context, so a feature may not propagate it.
+        # Detect it directly via the write-error counter so partial config can't commit.
+        local _cfg_write_failed=false
+        if [ "$_txn_active" = true ] && [ "${TRANSACTION_WRITE_ERRORS:-0}" -gt "$_werrs_before" ]; then
+            _cfg_write_failed=true
+        fi
+
+        if [ "$_feat_ok" = true ] && [ "$_cfg_write_failed" = false ]; then
             applied=$((applied + 1))
             log_success "$display done"
         else
             failed=$((failed + 1))
-            log_error "$display FAILED"
-            # Only a feature that wrote main-config edits before failing leaves an
-            # unsafe partial config -> roll back the whole transaction + abort.
-            # A non-config failure (wrote no config) keeps the earlier features'
-            # valid staged config, which still commits below.
-            if [ "$_txn_active" = true ] && [ "${TRANSACTION_WRITES:-0}" -gt "$_writes_before" ]; then
-                log_error "Rolling back staged server config ($display failed mid-write) — config left unchanged."
+            if [ "$_cfg_write_failed" = true ]; then
+                log_error "$display: a server-config write FAILED"
+            else
+                log_error "$display FAILED"
+            fi
+            # Roll back + abort only when this feature TOUCHED the server config —
+            # either a write physically failed, or the feature failed after writing
+            # config (its partial/guard-rejected config is unsafe). A non-config
+            # failure (no staged writes) keeps earlier features' valid config, which
+            # still commits below.
+            if [ "$_txn_active" = true ] && \
+               { [ "$_cfg_write_failed" = true ] || [ "${TRANSACTION_WRITES:-0}" -gt "$_writes_before" ]; }; then
+                log_error "Rolling back staged server config ($display) — config left unchanged."
                 transaction_rollback
                 _txn_active=false
                 break
