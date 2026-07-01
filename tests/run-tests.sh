@@ -3513,7 +3513,8 @@ woo_403=$(
     server_process_running() { return 0; }
     sleep() { :; }
     # Baseline: everything 200. Then checkout starts 403'ing.
-    http_status() { case "$1" in *"/checkout/") echo 403 ;; *) echo 200 ;; esac; }
+    # if/elif, not case: bash 3.2 mis-parses a `case` defined inside $()
+    http_status() { if [[ "$1" == *"/checkout/" ]]; then echo 403; else echo 200; fi; }
     LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
     LSO_BASELINE_VHOST_URL="http://shop/"; LSO_BASELINE_VHOST_STATUS=200
     LSO_BASELINE_WOO_URLS=("http://shop/cart/" "http://shop/checkout/" "http://shop/wp-json/wc/store/v1/products")
@@ -3594,7 +3595,8 @@ woo_500=$(
     # shellcheck source=/dev/null
     source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
     server_process_running() { return 0; }; sleep() { :; }
-    http_status() { case "$1" in *"/checkout/") echo 500 ;; *) echo 200 ;; esac; }
+    # if/elif, not case: bash 3.2 mis-parses a `case` defined inside $()
+    http_status() { if [[ "$1" == *"/checkout/" ]]; then echo 500; else echo 200; fi; }
     LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
     LSO_BASELINE_WOO_URLS=("http://shop/checkout/"); LSO_BASELINE_WOO_STATUS=(200)
     health_check && echo "RC:0" || echo "RC:1"
