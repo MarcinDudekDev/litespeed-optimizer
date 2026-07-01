@@ -70,19 +70,23 @@ secure_mktemp() {
     umask "$old_umask"
 }
 
-# Copy permissions from one file to another (BSD/GNU portable)
+# Copy permissions from one file to another (GNU/BSD portable).
+# GNU form FIRST: on Linux `stat -f` means "filesystem status" and SUCCEEDS with
+# the wrong (filesystem) output, short-circuiting the ||. `stat -c` fails cleanly
+# on BSD/macOS, so trying it first is correct on Linux and falls back on macOS.
 copy_file_permissions() {
     local src="$1" dst="$2"
     local mode
-    mode=$(stat -f '%Lp' "$src" 2>/dev/null || stat -c '%a' "$src" 2>/dev/null) || return 1
+    mode=$(stat -c '%a' "$src" 2>/dev/null || stat -f '%Lp' "$src" 2>/dev/null) || return 1
     chmod "$mode" "$dst"
 }
 
-# Copy ownership from one file to another (BSD/GNU portable; best-effort)
+# Copy ownership from one file to another (GNU/BSD portable; best-effort).
+# GNU form first — see copy_file_permissions for why the order matters.
 copy_file_ownership() {
     local src="$1" dst="$2"
     local owner
-    owner=$(stat -f '%Su:%Sg' "$src" 2>/dev/null || stat -c '%U:%G' "$src" 2>/dev/null) || return 1
+    owner=$(stat -c '%U:%G' "$src" 2>/dev/null || stat -f '%Su:%Sg' "$src" 2>/dev/null) || return 1
     chown "$owner" "$dst" 2>/dev/null || true
 }
 
@@ -233,7 +237,7 @@ file_checksum() {
     elif command -v md5 &>/dev/null; then
         md5 -q "$file" 2>/dev/null
     else
-        stat -f '%z-%m' "$file" 2>/dev/null || stat -c '%s-%Y' "$file" 2>/dev/null || echo "unknown"
+        stat -c '%s-%Y' "$file" 2>/dev/null || stat -f '%z-%m' "$file" 2>/dev/null || echo "unknown"
     fi
 }
 

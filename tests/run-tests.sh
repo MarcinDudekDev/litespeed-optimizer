@@ -1095,7 +1095,10 @@ else
     log_fail "auth: path not stable across reads: [$nr_out]"
 fi
 if [ -f "$nr_file" ]; then
-    nr_mode=$(stat -f '%Lp' "$nr_file" 2>/dev/null || stat -c '%a' "$nr_file" 2>/dev/null)
+    # GNU form first: on Linux `stat -f` means "filesystem status" and SUCCEEDS with
+    # the wrong output, short-circuiting the ||. `stat -c` fails cleanly on BSD/macOS,
+    # so trying it first works on Linux and falls back to the BSD form on macOS.
+    nr_mode=$(stat -c '%a' "$nr_file" 2>/dev/null || stat -f '%Lp' "$nr_file" 2>/dev/null)
     if [ "$nr_mode" = "600" ] && grep -q 'user = "bob:s3c r3t"' "$nr_file"; then
         log_pass "auth: file is mode 600 with quoted user directive (whitespace-safe)"
     else
@@ -1926,6 +1929,173 @@ if grep -q "WordPressProtect drop, 10" "$SEC_ENT_FIX/etc/apache2/conf.d/includes
     log_pass "security: WordPressProtect written on Enterprise"
 else
     log_fail "security: WordPressProtect missing on Enterprise"
+fi
+
+################################################################################
+# SECTION 15c: fail2ban Feature (LIVE-phase Item 1 — offline/fixture only)
+################################################################################
+log_section "fail2ban Feature Tests"
+
+F2B_FIX="${TEST_TMP}/f2b-fix"
+F2B_DATA="${TEST_TMP}/f2b-data"
+mkdir -p "$F2B_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$F2B_FIX"
+mkdir -p "$F2B_FIX/etc/php.d"
+
+F2B_JAIL="$F2B_FIX/etc/fail2ban/jail.d/lso-jails.conf"
+F2B_FILT="$F2B_FIX/etc/fail2ban/filter.d"
+f2b_env() {
+    LSO_DATA_DIR="$F2B_DATA" LSO_FS_ROOT="$F2B_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$F2B_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+
+# Opt-in gate: selecting the feature WITHOUT --fail2ban must deploy nothing.
+f2b_gate_out=$(f2b_env optimize --feature fail2ban --force)
+if [ ! -f "$F2B_JAIL" ] && echo "$f2b_gate_out" | grep -qi "pass --fail2ban to deploy"; then
+    log_pass "fail2ban: opt-in gate — no jails without --fail2ban (guidance printed)"
+else
+    log_fail "fail2ban: feature deployed or gate message missing without --fail2ban"
+fi
+
+# --fail2ban deploys filters + jails DISABLED (enabled = false).
+f2b_disabled_out=$(f2b_env optimize --fail2ban --force)
+f2b_dis_ok=true
+[ -f "$F2B_JAIL" ] || { log_fail "fail2ban: jail file not written by --fail2ban"; f2b_dis_ok=false; }
+for f in lso-wp-login lso-xmlrpc lso-4xx-scan; do
+    [ -f "$F2B_FILT/${f}.conf" ] || { log_fail "fail2ban: filter ${f}.conf missing"; f2b_dis_ok=false; }
+done
+if [ -f "$F2B_JAIL" ] && [ "$(grep -c "enabled = false" "$F2B_JAIL")" = "3" ] \
+    && ! grep -q "enabled = true" "$F2B_JAIL"; then
+    :
+else
+    log_fail "fail2ban: jails not all disabled on --fail2ban (expected 3x 'enabled = false')"
+    f2b_dis_ok=false
+fi
+# logpath must be the REAL server path (fixture prefix stripped), not the fixture tree.
+if [ -f "$F2B_JAIL" ] && grep -q "logpath = /usr/local/lsws/logs/access.log" "$F2B_JAIL" \
+    && ! grep -q "logpath = ${F2B_FIX}" "$F2B_JAIL"; then
+    :
+else
+    log_fail "fail2ban: logpath not the real server path (fixture prefix leaked?)"
+    f2b_dis_ok=false
+fi
+# ignoreip carries loopback (server IPs are live-only, so none in fixture mode).
+if [ -f "$F2B_JAIL" ] && grep -q "ignoreip = 127.0.0.1/8 ::1" "$F2B_JAIL"; then :; else
+    log_fail "fail2ban: ignoreip loopback baseline missing"
+    f2b_dis_ok=false
+fi
+[ "$f2b_dis_ok" = true ] && log_pass "fail2ban: --fail2ban deploys 3 filters + 3 DISABLED jails (real logpath, loopback ignoreip)"
+
+# Idempotent: re-apply --fail2ban keeps exactly one jail file / one block set.
+f2b_env optimize --fail2ban --force >/dev/null
+if [ "$(grep -c "\[lso-wp-login\]" "$F2B_JAIL" 2>/dev/null)" = "1" ]; then
+    log_pass "fail2ban: jail file is idempotent (single block set on re-apply)"
+else
+    log_fail "fail2ban: jail blocks duplicated on re-apply"
+fi
+
+# --fail2ban-enable ARMS the jails (fixture access.log has real client IPs → guard passes).
+f2b_arm_out=$(f2b_env optimize --fail2ban-enable --force)
+if [ -f "$F2B_JAIL" ] && [ "$(grep -c "enabled = true" "$F2B_JAIL")" = "3" ] \
+    && ! grep -q "enabled = false" "$F2B_JAIL"; then
+    log_pass "fail2ban: --fail2ban-enable arms all 3 jails (real-IP guard passed)"
+else
+    log_fail "fail2ban: --fail2ban-enable did not arm jails: $(echo "$f2b_arm_out" | grep -i abort)"
+fi
+# --trusted-ip is appended to ignoreip when arming.
+f2b_env optimize --fail2ban-enable --trusted-ip "192.0.2.50" --force >/dev/null
+if grep -q "ignoreip = 127.0.0.1/8 ::1 192.0.2.50" "$F2B_JAIL" 2>/dev/null; then
+    log_pass "fail2ban: --trusted-ip appended to jail ignoreip"
+else
+    log_fail "fail2ban: --trusted-ip not reflected in ignoreip"
+fi
+
+# CDN real-IP guard: arming behind a CDN (edge IP in the access log) HARD-ABORTS
+# and writes no jail file (fresh fixture so absence is meaningful).
+F2B_CDN_FIX="${TEST_TMP}/f2b-cdn-fix"
+F2B_CDN_DATA="${TEST_TMP}/f2b-cdn-data"
+mkdir -p "$F2B_CDN_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$F2B_CDN_FIX"
+mkdir -p "$F2B_CDN_FIX/etc/php.d"
+# Overwrite the access log so the logged client is a Cloudflare edge IP (172.64.0.0/13).
+printf '%s\n' '172.68.10.7 - - [01/Jul/2026:10:00:00 +0000] "GET / HTTP/1.1" 200 100 "-" "UA"' \
+    > "$F2B_CDN_FIX/usr/local/lsws/logs/access.log"
+f2b_cdn_out=$(LSO_DATA_DIR="$F2B_CDN_DATA" LSO_FS_ROOT="$F2B_CDN_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$F2B_CDN_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --fail2ban-enable --force 2>&1 || true)
+if [ ! -f "$F2B_CDN_FIX/etc/fail2ban/jail.d/lso-jails.conf" ] \
+    && echo "$f2b_cdn_out" | grep -qi "CDN edge IP"; then
+    log_pass "fail2ban: CDN real-IP guard hard-aborts arming (no jail written behind an edge IP)"
+else
+    log_fail "fail2ban: CDN guard did not abort arming behind an edge IP"
+fi
+
+# Unit tests: the CIDR containment engine (sourced directly, no CLI).
+f2b_unit=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    LSO_FS_ROOT=""; LSO_LSWS_ROOT="/usr/local/lsws"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/fail2ban.sh"
+    ok=0; bad=0
+    assert_in()  { if _f2b_cidr_contains "$1" "$2"; then ok=$((ok+1)); else bad=$((bad+1)); echo "MISS $1 $2"; fi; }
+    assert_out() { if _f2b_cidr_contains "$1" "$2"; then bad=$((bad+1)); echo "FP $1 $2"; else ok=$((ok+1)); fi; }
+    assert_in  162.158.5.9 162.158.0.0/15       # Cloudflare v4
+    assert_out 8.8.8.8 162.158.0.0/15
+    assert_in  104.16.55.1 104.16.0.0/13        # Cloudflare v4
+    assert_out 203.0.113.7 104.16.0.0/13
+    assert_in  2606:4700::1 2606:4700::/32      # Cloudflare v6
+    assert_out 2001:db8::1 2606:4700::/32
+    assert_in  2a06:98c7::1 2a06:98c0::/29      # /29 partial-nibble
+    assert_out 2a06:98d0::1 2a06:98c0::/29
+    # family mismatch is never a containment
+    assert_out 2606:4700::1 104.16.0.0/13
+    # malformed inputs must be rejected (not silently mis-parsed)
+    if _f2b_ipv6_expand "2001::db8::1" >/dev/null 2>&1; then bad=$((bad+1)); echo "FP multi-::"; else ok=$((ok+1)); fi
+    if _f2b_ipv4_to_int "010.0.0.1" >/dev/null 2>&1; then bad=$((bad+1)); echo "FP leading-zero"; else ok=$((ok+1)); fi
+    if _f2b_ipv6_expand "::" >/dev/null 2>&1; then ok=$((ok+1)); else bad=$((bad+1)); echo "MISS ::"; fi
+    # external vs local classification
+    if _f2b_is_external_ip 8.8.8.8; then ok=$((ok+1)); else bad=$((bad+1)); echo "MISS ext-public"; fi
+    if _f2b_is_external_ip 127.0.0.1; then bad=$((bad+1)); echo "FP ext-loopback"; else ok=$((ok+1)); fi
+    if _f2b_is_external_ip 10.1.2.3; then bad=$((bad+1)); echo "FP ext-private"; else ok=$((ok+1)); fi
+    # _f2b_ip_in_any against the embedded CDN range list
+    if _f2b_ip_in_any 172.68.1.1 "$_F2B_CDN_RANGES"; then ok=$((ok+1)); else bad=$((bad+1)); echo "MISS any-edge"; fi
+    if _f2b_ip_in_any 203.0.113.7 "$_F2B_CDN_RANGES"; then bad=$((bad+1)); echo "FP any-real"; else ok=$((ok+1)); fi
+    echo "RESULT ok=$ok bad=$bad"
+)
+if echo "$f2b_unit" | grep -q "RESULT ok=17 bad=0"; then
+    log_pass "fail2ban: CIDR engine — 17/17 cases (v4/v6, /29 nibble+bit, family mismatch, malformed rejects, ext/local)"
+else
+    log_fail "fail2ban: CIDR engine assertions failed: $(echo "$f2b_unit" | grep -vi result | tr '\n' ' ') [$(echo "$f2b_unit" | grep RESULT)]"
+fi
+
+# Unit test: the real-IP guard aborts on a CDN edge log and passes on a real-IP log.
+f2b_guard=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    LSO_FS_ROOT=""
+    gdir=$(mktemp -d "${TEST_TMP}/f2b-guard.XXXXXX")
+    mkdir -p "$gdir/logs"
+    LSO_LSWS_ROOT="$gdir"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/fail2ban.sh"
+    printf '%s\n' '203.0.113.9 - - [x] "GET / HTTP/1.1" 200 1 "-" "UA"' > "$gdir/logs/access.log"
+    if _f2b_realip_guard; then echo "REAL:pass"; else echo "REAL:fail"; fi
+    printf '%s\n' '104.16.9.9 - - [x] "GET / HTTP/1.1" 200 1 "-" "UA"' > "$gdir/logs/access.log"
+    if _f2b_realip_guard; then echo "EDGE:pass"; else echo "EDGE:abort"; fi
+    printf '%s\n' '127.0.0.1 - - [x] "GET / HTTP/1.1" 200 1 "-" "UA"' > "$gdir/logs/access.log"
+    if _f2b_realip_guard; then echo "LOCAL:pass"; else echo "LOCAL:abort"; fi
+    rm -f "$gdir/logs/access.log"
+    if _f2b_realip_guard; then echo "NOLOG:pass"; else echo "NOLOG:abort"; fi
+)
+if echo "$f2b_guard" | grep -q "REAL:pass" \
+    && echo "$f2b_guard" | grep -q "EDGE:abort" \
+    && echo "$f2b_guard" | grep -q "LOCAL:abort" \
+    && echo "$f2b_guard" | grep -q "NOLOG:abort"; then
+    log_pass "fail2ban: real-IP guard passes on real IPs, aborts on CDN edge + loopback-only + unreadable log"
+else
+    log_fail "fail2ban: real-IP guard behaviour wrong: $(echo "$f2b_guard" | tr '\n' ' ')"
 fi
 
 ################################################################################
@@ -3346,7 +3516,8 @@ woo_403=$(
     server_process_running() { return 0; }
     sleep() { :; }
     # Baseline: everything 200. Then checkout starts 403'ing.
-    http_status() { case "$1" in *"/checkout/") echo 403 ;; *) echo 200 ;; esac; }
+    # if/elif, not case: bash 3.2 mis-parses a `case` defined inside $()
+    http_status() { if [[ "$1" == *"/checkout/" ]]; then echo 403; else echo 200; fi; }
     LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
     LSO_BASELINE_VHOST_URL="http://shop/"; LSO_BASELINE_VHOST_STATUS=200
     LSO_BASELINE_WOO_URLS=("http://shop/cart/" "http://shop/checkout/" "http://shop/wp-json/wc/store/v1/products")
@@ -3427,7 +3598,8 @@ woo_500=$(
     # shellcheck source=/dev/null
     source "${ROOT_DIR}/litespeed-optimizer-lib/validator.sh"
     server_process_running() { return 0; }; sleep() { :; }
-    http_status() { case "$1" in *"/checkout/") echo 500 ;; *) echo 200 ;; esac; }
+    # if/elif, not case: bash 3.2 mis-parses a `case` defined inside $()
+    http_status() { if [[ "$1" == *"/checkout/" ]]; then echo 500; else echo 200; fi; }
     LSO_BASELINE_URL="http://loop/"; LSO_BASELINE_STATUS=200
     LSO_BASELINE_WOO_URLS=("http://shop/checkout/"); LSO_BASELINE_WOO_STATUS=(200)
     health_check && echo "RC:0" || echo "RC:1"

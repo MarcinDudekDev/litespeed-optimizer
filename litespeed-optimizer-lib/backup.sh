@@ -290,6 +290,13 @@ restore_backup_files() {
         if [ -z "${LSO_FS_ROOT:-}" ] && command -v fail2ban-client >/dev/null 2>&1; then
             fail2ban-client reload >/dev/null 2>&1 \
                 || log_warn "fail2ban config restored but reload failed — run 'fail2ban-client reload' manually"
+            # Clear the active ban table: a ban placed DURING the bad run persists in
+            # the runtime DB (/var/lib/fail2ban) after a config-only restore. unban
+            # --all flushes it so rollback truly undoes the run. It clears ALL current
+            # bans (including any pre-existing ones) — acceptable on a rollback, where
+            # the goal is a clean pre-change state. Live-only (guarded above).
+            fail2ban-client unban --all >/dev/null 2>&1 \
+                || log_warn "fail2ban reloaded but 'unban --all' failed — clear stale bans manually if needed"
         fi
     fi
 
