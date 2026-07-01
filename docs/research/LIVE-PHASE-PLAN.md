@@ -102,6 +102,16 @@ interactions to document and guard:
   access log shows a CDN edge IP, an unreadable log, or no client IPs.
 - New tests: SECTION 15c (CLI opt-in gate, disabled/armed, idempotency, trusted-ip ignoreip, CDN
   abort) + unit tests for the CIDR engine and the real-IP guard. Suite green, shellcheck clean.
+- grok reviewed the diff (no Critical bugs). Folded in this PR: require ≥1 external client IP in the
+  log sample or abort (loopback-only can't confirm real-IP behind a CDN); reject malformed IPs
+  (multi-`::`, leading-zero octal); wp-login failregex now also matches 302/429; DRY_RUN also gates
+  `hostname -I`; clearer abort message. **grok carry-forward to the LIVE-ARM step (not offline):**
+  (1) fetch the AUTHORITATIVE Cloudflare + QUIC.cloud IP lists at arm time and abort on fetch/parse
+  failure — the embedded ranges are for offline tests only; (2) handle non-CF/QUIC CDNs (Fastly/
+  Bunny/Akamai) — detect via response headers and refuse to arm if the CDN can't be identified;
+  (3) temporal sampling — the 50-line window can predate a just-enabled CDN, so probe through the
+  CDN URL / require the newest hits to reflect the real IP before arming; (4) document/verify the
+  access-log field-1 assumption against the live logFormat directive.
 - New `lib/features/fail2ban.sh` (opt-in `--fail2ban`). Install fail2ban; deploy OLS-SPECIFIC filters
   (OLS access-log format differs from Apache combined) for POST floods on wp-login + xmlrpc and a
   repeated-4xx scanner jail. Capture a REAL litespeed-demo access-log line into fixtures and pin the

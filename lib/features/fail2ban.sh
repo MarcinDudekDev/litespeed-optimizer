@@ -29,6 +29,13 @@ _F2B_CDN_RANGES="\
 2a06:98c0::/29 2c0f:f248::/32 \
 102.221.36.98/32 103.106.229.82/32 104.244.77.37/32"
 
+# Loopback + RFC1918 private + link-local. A sample of ONLY these (health checks,
+# local cron, curl localhost) is not evidence that public, CDN-fronted traffic
+# reaches OLS with the real client IP — so the guard refuses to arm on it.
+_F2B_LOCAL_RANGES="\
+127.0.0.0/8 ::1/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 \
+fe80::/10 fc00::/7"
+
 ################################################################################
 # CIDR containment (bash 3.2: integer math for v4, nibble+bit compare for v6)
 ################################################################################
@@ -42,6 +49,9 @@ _f2b_ipv4_to_int() {
     [ $# -eq 4 ] || return 1
     for octet in "$@"; do
         [[ "$octet" =~ ^[0-9]+$ ]] || return 1
+        # Reject leading-zero octets ("010") — bash arithmetic would read them as
+        # octal, silently changing the address.
+        [ "${#octet}" -gt 1 ] && [ "${octet:0:1}" = "0" ] && return 1
         [ "$octet" -ge 0 ] && [ "$octet" -le 255 ] || return 1
         result=$(( (result << 8) + octet ))
     done
@@ -65,6 +75,10 @@ _f2b_ipv4_in_cidr() {
 _f2b_ipv6_expand() {
     local ip="$1"
     if [[ "$ip" == *::* ]]; then
+        # Only one "::" is legal. If anything after the first "::" still contains
+        # "::", the address is malformed (e.g. 2001::db8::1) — reject it.
+        local after_first="${ip#*::}"
+        [[ "$after_first" == *::* ]] && return 1
         local left="${ip%%::*}" right="${ip##*::}" present=0 colons zeros="" i
         if [ -n "$left" ]; then
             colons="${left//[^:]/}"; present=$(( ${#colons} + 1 ))
@@ -146,6 +160,12 @@ _f2b_is_ip() {
     fi
 }
 
+# True if <ip> is a routable public address (not loopback/private/link-local).
+_f2b_is_external_ip() {
+    _f2b_ip_in_any "$1" "$_F2B_LOCAL_RANGES" && return 1
+    return 0
+}
+
 ################################################################################
 # Real-IP guard — hard abort before arming host banning behind a CDN
 ################################################################################
@@ -163,7 +183,10 @@ _f2b_realip_guard() {
         return 1
     fi
 
-    local lines ip edge_found=0 valid=0 first_edge=""
+    # tail gives the NEWEST lines; if a CDN edge appears in any of them, the real
+    # client IP is not restored. We also require at least one EXTERNAL client IP so
+    # a window of only loopback/local traffic can't pass the guard behind a CDN.
+    local lines ip edge_found=0 valid=0 external=0 first_edge=""
     lines=$(tail -n 50 "$log" 2>/dev/null)
     while IFS= read -r line; do
         [ -n "$line" ] || continue
@@ -173,6 +196,8 @@ _f2b_realip_guard() {
         if _f2b_ip_in_any "$ip" "$_F2B_CDN_RANGES"; then
             edge_found=1
             [ -z "$first_edge" ] && first_edge="$ip"
+        elif _f2b_is_external_ip "$ip"; then
+            external=$(( external + 1 ))
         fi
     done <<EOF
 $lines
@@ -187,6 +212,12 @@ EOF
     fi
     if [ "$valid" -eq 0 ]; then
         log_error "fail2ban: no client IPs found in the access log — cannot confirm real-IP restoration; refusing to arm."
+        return 1
+    fi
+    if [ "$external" -eq 0 ]; then
+        log_error "fail2ban: the access log sample has no external (public) client IPs — only loopback/local traffic."
+        log_error "  That is not evidence that CDN-fronted public traffic reaches OLS with the real client IP."
+        log_error "  Generate/await some real public hits, confirm them in the log, then re-run with --fail2ban-enable."
         return 1
     fi
     return 0
@@ -229,7 +260,7 @@ _f2b_write_filter() {
 _f2b_write_filters() {
     # wp-login POST flood (brute force): repeated POSTs to the login endpoint.
     _f2b_write_filter "lso-wp-login" \
-        '^<HOST> .*"POST /wp-login\.php[^"]* HTTP/[0-9.]+" (200|401|403)' || return 1
+        '^<HOST> .*"POST /wp-login\.php[^"]* HTTP/[0-9.]+" (200|302|401|403|429)' || return 1
     # xmlrpc POST flood (amplification / brute force via system.multicall).
     _f2b_write_filter "lso-xmlrpc" \
         '^<HOST> .*"POST /xmlrpc\.php[^"]* HTTP/[0-9.]+" [0-9]+' || return 1
@@ -256,7 +287,7 @@ _f2b_write_jail() {
 
     # ignoreip: loopback + trusted allowlist (+ server IPs on a live box).
     local server_ips=""
-    if [ -z "${LSO_FS_ROOT:-}" ] && command -v hostname >/dev/null 2>&1; then
+    if [ -z "${LSO_FS_ROOT:-}" ] && [ "${DRY_RUN:-false}" != true ] && command -v hostname >/dev/null 2>&1; then
         server_ips=$(hostname -I 2>/dev/null | tr -s ' ' | sed 's/ *$//')
     fi
     ignoreip="127.0.0.1/8 ::1"
@@ -319,6 +350,8 @@ _f2b_write_jail() {
 ################################################################################
 # Live activation (skipped entirely in fixture / dry-run mode)
 ################################################################################
+# Live activation — no arg; reload behaviour is the same whether jails are armed
+# or staged-disabled (fail2ban re-reads the whole config).
 _f2b_live_activate() {
     if [ -n "${LSO_FS_ROOT:-}" ] || [ "${DRY_RUN:-false}" = true ]; then
         log_info "[DRY RUN] Would run fail2ban-regex on the filters, 'fail2ban-client -t', then reload"
@@ -367,7 +400,8 @@ feature_apply_custom_fail2ban() {
     if [ "${LSO_FAIL2BAN_ENABLE:-}" = "1" ]; then
         # Hard abort: do not arm host banning until the real client IP is confirmed.
         if ! _f2b_realip_guard; then
-            log_error "fail2ban: aborting — real client IP not confirmed. No jail files written."
+            log_error "fail2ban: aborting arm — real client IP not confirmed (see above). No changes written this run"
+            log_error "  (any previously staged DISABLED jails are left untouched)."
             return 1
         fi
         arm=1
@@ -382,7 +416,7 @@ feature_apply_custom_fail2ban() {
         log_info "fail2ban: jails deployed DISABLED — review, then re-run with --fail2ban-enable to arm"
     fi
 
-    _f2b_live_activate "$arm"
+    _f2b_live_activate
 }
 
 feature_detect_custom_fail2ban() {

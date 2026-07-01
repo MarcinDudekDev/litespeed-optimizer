@@ -2048,13 +2048,21 @@ f2b_unit=$(
     assert_out 2a06:98d0::1 2a06:98c0::/29
     # family mismatch is never a containment
     assert_out 2606:4700::1 104.16.0.0/13
+    # malformed inputs must be rejected (not silently mis-parsed)
+    if _f2b_ipv6_expand "2001::db8::1" >/dev/null 2>&1; then bad=$((bad+1)); echo "FP multi-::"; else ok=$((ok+1)); fi
+    if _f2b_ipv4_to_int "010.0.0.1" >/dev/null 2>&1; then bad=$((bad+1)); echo "FP leading-zero"; else ok=$((ok+1)); fi
+    if _f2b_ipv6_expand "::" >/dev/null 2>&1; then ok=$((ok+1)); else bad=$((bad+1)); echo "MISS ::"; fi
+    # external vs local classification
+    if _f2b_is_external_ip 8.8.8.8; then ok=$((ok+1)); else bad=$((bad+1)); echo "MISS ext-public"; fi
+    if _f2b_is_external_ip 127.0.0.1; then bad=$((bad+1)); echo "FP ext-loopback"; else ok=$((ok+1)); fi
+    if _f2b_is_external_ip 10.1.2.3; then bad=$((bad+1)); echo "FP ext-private"; else ok=$((ok+1)); fi
     # _f2b_ip_in_any against the embedded CDN range list
     if _f2b_ip_in_any 172.68.1.1 "$_F2B_CDN_RANGES"; then ok=$((ok+1)); else bad=$((bad+1)); echo "MISS any-edge"; fi
     if _f2b_ip_in_any 203.0.113.7 "$_F2B_CDN_RANGES"; then bad=$((bad+1)); echo "FP any-real"; else ok=$((ok+1)); fi
     echo "RESULT ok=$ok bad=$bad"
 )
-if echo "$f2b_unit" | grep -q "RESULT ok=11 bad=0"; then
-    log_pass "fail2ban: CIDR engine — 11/11 containment cases (v4, v6, /29 nibble+bit, family mismatch)"
+if echo "$f2b_unit" | grep -q "RESULT ok=17 bad=0"; then
+    log_pass "fail2ban: CIDR engine — 17/17 cases (v4/v6, /29 nibble+bit, family mismatch, malformed rejects, ext/local)"
 else
     log_fail "fail2ban: CIDR engine assertions failed: $(echo "$f2b_unit" | grep -vi result | tr '\n' ' ') [$(echo "$f2b_unit" | grep RESULT)]"
 fi
@@ -2073,13 +2081,16 @@ f2b_guard=$(
     if _f2b_realip_guard; then echo "REAL:pass"; else echo "REAL:fail"; fi
     printf '%s\n' '104.16.9.9 - - [x] "GET / HTTP/1.1" 200 1 "-" "UA"' > "$gdir/logs/access.log"
     if _f2b_realip_guard; then echo "EDGE:pass"; else echo "EDGE:abort"; fi
+    printf '%s\n' '127.0.0.1 - - [x] "GET / HTTP/1.1" 200 1 "-" "UA"' > "$gdir/logs/access.log"
+    if _f2b_realip_guard; then echo "LOCAL:pass"; else echo "LOCAL:abort"; fi
     rm -f "$gdir/logs/access.log"
     if _f2b_realip_guard; then echo "NOLOG:pass"; else echo "NOLOG:abort"; fi
 )
 if echo "$f2b_guard" | grep -q "REAL:pass" \
     && echo "$f2b_guard" | grep -q "EDGE:abort" \
+    && echo "$f2b_guard" | grep -q "LOCAL:abort" \
     && echo "$f2b_guard" | grep -q "NOLOG:abort"; then
-    log_pass "fail2ban: real-IP guard passes on real IPs, aborts on CDN edge + unreadable log"
+    log_pass "fail2ban: real-IP guard passes on real IPs, aborts on CDN edge + loopback-only + unreadable log"
 else
     log_fail "fail2ban: real-IP guard behaviour wrong: $(echo "$f2b_guard" | tr '\n' ' ')"
 fi
