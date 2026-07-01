@@ -66,8 +66,15 @@ LOAD_MODE=false
 # shellcheck disable=SC2034  # consumed by lib/features/security.sh (badbots) + future live features
 LSO_TRUSTED_IPS="${LSO_TRUSTED_IPS:-}"
 
+# fail2ban opt-in gates (set by --fail2ban / --fail2ban-enable, or via env).
+# Read as ${LSO_FAIL2BAN:-} / ${LSO_FAIL2BAN_ENABLE:-} by lib/features/fail2ban.sh.
+# shellcheck disable=SC2034  # consumed by lib/features/fail2ban.sh
+LSO_FAIL2BAN="${LSO_FAIL2BAN:-}"
+# shellcheck disable=SC2034  # consumed by lib/features/fail2ban.sh
+LSO_FAIL2BAN_ENABLE="${LSO_FAIL2BAN_ENABLE:-}"
+
 # Allowed feature names / aliases for --feature and --exclude.
-# These are the 7 REGISTERED features (lib/features/*.sh); keep this list in
+# These are the REGISTERED features (lib/features/*.sh); keep this list in
 # sync with feature_register calls. Roadmap-only features (http3, redis-tuning,
 # mariadb, os-limits) are intentionally NOT here — accepting them would pass
 # validation and then fail at apply with "Feature not available".
@@ -79,6 +86,7 @@ ALLOWED_FEATURES=(
     "lscwp" "plugin"
     "woocommerce" "woo"
     "security" "headers" "throttling"
+    "fail2ban" "f2b"
 )
 
 ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
@@ -347,8 +355,12 @@ OPTIONS:
     --badbots                   security: also deploy an opt-in bad-bot UA
                                 denylist to each site's .htaccess (default: off)
     --trusted-ip <ip[,ip...]>   allowlist IPs/CIDRs exempt from the bad-bot
-                                blocker (and fail2ban/throttling as they land);
-                                comma- or space-separated, repeatable
+                                blocker + fail2ban (ignoreip); comma- or
+                                space-separated, repeatable
+    --fail2ban                  deploy fail2ban filters + jails DISABLED
+                                (wp-login/xmlrpc/4xx), opt-in (default: off)
+    --fail2ban-enable           arm the jails; aborts unless the access log
+                                shows the real client IP (not a CDN edge)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -361,6 +373,8 @@ FEATURES (use with --feature / --exclude):
                                 (incl. Redis object-cache wiring when present)
     woocommerce                 ESI, crawler, WooCommerce cache checks
     security                    Throttling, headers, xmlrpc, CVE checks
+    fail2ban                    fail2ban brute-force/scanner jails, staged
+                                (opt-in via --fail2ban; NOT in default profiles)
 
     Planned (not yet implemented; see ROADMAP.md): http3 · redis tuning ·
     mariadb buffer pool · os-limits (systemd/sysctl)
@@ -832,6 +846,21 @@ parse_arguments() {
                 ;;
             --badbots)
                 export LSO_BADBOTS=1
+                shift
+                ;;
+            --fail2ban)
+                # Opt-in: deploy fail2ban filters + jails DISABLED. Also select the
+                # feature (it is not in any default profile) unless one was named.
+                export LSO_FAIL2BAN=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="fail2ban"
+                shift
+                ;;
+            --fail2ban-enable)
+                # Arm the jails. Implies --fail2ban; the feature hard-aborts unless
+                # the access log shows the real client IP (never firewall a CDN edge).
+                export LSO_FAIL2BAN=1
+                export LSO_FAIL2BAN_ENABLE=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="fail2ban"
                 shift
                 ;;
             --trusted-ip)
