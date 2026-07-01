@@ -1095,7 +1095,10 @@ else
     log_fail "auth: path not stable across reads: [$nr_out]"
 fi
 if [ -f "$nr_file" ]; then
-    nr_mode=$(stat -f '%Lp' "$nr_file" 2>/dev/null || stat -c '%a' "$nr_file" 2>/dev/null)
+    # GNU form first: on Linux `stat -f` means "filesystem status" and SUCCEEDS with
+    # the wrong output, short-circuiting the ||. `stat -c` fails cleanly on BSD/macOS,
+    # so trying it first works on Linux and falls back to the BSD form on macOS.
+    nr_mode=$(stat -c '%a' "$nr_file" 2>/dev/null || stat -f '%Lp' "$nr_file" 2>/dev/null)
     if [ "$nr_mode" = "600" ] && grep -q 'user = "bob:s3c r3t"' "$nr_file"; then
         log_pass "auth: file is mode 600 with quoted user directive (whitespace-safe)"
     else
