@@ -77,6 +77,10 @@ LSO_FAIL2BAN_ENABLE="${LSO_FAIL2BAN_ENABLE:-}"
 # by lib/features/modsec.sh. Ships DetectionOnly only; never enforces.
 # shellcheck disable=SC2034  # consumed by lib/features/modsec.sh
 LSO_MODSEC="${LSO_MODSEC:-}"
+# ModSecurity enforce flip (--modsec-enforce). Distinct from --modsec; flips a
+# DEPLOYED DetectionOnly config to SecRuleEngine On. Read as ${LSO_MODSEC_ENFORCE:-}.
+# shellcheck disable=SC2034  # consumed by lib/features/modsec.sh
+LSO_MODSEC_ENFORCE="${LSO_MODSEC_ENFORCE:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the REGISTERED features (lib/features/*.sh); keep this list in
@@ -369,6 +373,8 @@ OPTIONS:
                                 shows the real client IP (not a CDN edge)
     --modsec                    deploy ModSecurity v3 + OWASP CRS in
                                 DetectionOnly (never enforces), opt-in
+    --modsec-enforce            flip a DEPLOYED DetectionOnly ModSecurity to
+                                enforcing (SecRuleEngine On); gated, opt-in
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -877,6 +883,14 @@ parse_arguments() {
                 # Opt-in: deploy ModSecurity v3 in DetectionOnly (never enforces).
                 # Also select the feature (not in any default profile) unless named.
                 export LSO_MODSEC=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="modsec"
+                shift
+                ;;
+            --modsec-enforce)
+                # Distinct, gated flip of a DEPLOYED DetectionOnly config to enforcing.
+                # Implies --modsec; refuses unless the engine is currently DetectionOnly.
+                export LSO_MODSEC=1
+                export LSO_MODSEC_ENFORCE=1
                 [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="modsec"
                 shift
                 ;;

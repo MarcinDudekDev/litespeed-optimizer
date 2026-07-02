@@ -2294,6 +2294,110 @@ else
     log_fail "modsec: feature_detect failed to recognize staged config: $ms_detect"
 fi
 
+# --- Item 4: --modsec-enforce flip (distinct, gated) ---
+MSF_FIX="${TEST_TMP}/msf-fix"; MSF_DATA="${TEST_TMP}/msf-data"
+mkdir -p "$MSF_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MSF_FIX"; mkdir -p "$MSF_FIX/etc/php.d"
+MSF_CONF="$MSF_FIX/usr/local/lsws/conf/httpd_config.conf"
+MSF_INC="$MSF_FIX/usr/local/lsws/conf/modsec/modsec_includes.conf"
+msf_env() {
+    LSO_DATA_DIR="$MSF_DATA" LSO_FS_ROOT="$MSF_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$MSF_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+
+# Enforce BEFORE deploy -> refuse (nothing to flip).
+msf_pre=$(msf_env optimize --modsec-enforce --force)
+if echo "$msf_pre" | grep -qi "no tool-managed" && [ ! -f "$MSF_INC" ]; then
+    log_pass "modsec-enforce: refuses before --modsec deploy (nothing written)"
+else
+    log_fail "modsec-enforce: did not refuse before deploy"
+fi
+
+# Deploy DetectionOnly, then flip to enforcing.
+msf_env optimize --modsec --force >/dev/null
+msf_flip=$(msf_env optimize --modsec-enforce --force)
+if grep -qE '^SecRuleEngine On$' "$MSF_INC" 2>/dev/null \
+    && ! grep -qE '^SecRuleEngine[[:space:]]+DetectionOnly' "$MSF_INC" 2>/dev/null \
+    && [ "$(awk '/^module mod_security \{/,/^\}/' "$MSF_CONF" | grep -cE 'modsecurity[[:space:]]+on')" = "1" ]; then
+    log_pass "modsec-enforce: flips DetectionOnly -> SecRuleEngine On (module block untouched)"
+else
+    log_fail "modsec-enforce: flip did not set SecRuleEngine On: $(echo "$msf_flip" | grep -i verif)"
+fi
+
+# Idempotent: flipping again is a no-op.
+msf_again=$(msf_env optimize --modsec-enforce --force)
+if echo "$msf_again" | grep -qi "already enforcing" \
+    && [ "$(grep -cE '^SecRuleEngine' "$MSF_INC")" = "1" ]; then
+    log_pass "modsec-enforce: idempotent (already enforcing -> no-op, single engine line)"
+else
+    log_fail "modsec-enforce: not idempotent"
+fi
+
+# feature_detect recognizes the enforcing (On) config too.
+msf_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$MSF_FIX"; LSO_LSWS_ROOT="$MSF_FIX/usr/local/lsws"; LSO_MAIN_CONF="$MSF_CONF"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/modsec.sh"
+    if feature_detect_custom_modsec "$MSF_CONF"; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$msf_detect" | grep -q "DETECT:yes"; then
+    log_pass "modsec-enforce: feature_detect still recognizes modsec when enforcing (On)"
+else
+    log_fail "modsec-enforce: feature_detect lost the enforcing config: $msf_detect"
+fi
+
+# Re-running --modsec after an enforce flip reverts to DetectionOnly (safe default).
+msf_env optimize --modsec --force >/dev/null
+if grep -qE '^SecRuleEngine[[:space:]]+DetectionOnly' "$MSF_INC" 2>/dev/null \
+    && ! grep -qE '^SecRuleEngine On$' "$MSF_INC" 2>/dev/null; then
+    log_pass "modsec-enforce: re-running --modsec reverts to DetectionOnly (safe re-deploy)"
+else
+    log_fail "modsec-enforce: --modsec did not revert enforcing to DetectionOnly"
+fi
+
+# Ownership guard: a deploy with the managed marker stripped is NOT flipped (refuses,
+# stays DetectionOnly) — never enforce a config this tool didn't manage.
+msf_env optimize --modsec --force >/dev/null
+grep -v "Managed by litespeed-optimizer" "$MSF_INC" > "${MSF_INC}.x" && mv "${MSF_INC}.x" "$MSF_INC"
+msf_own=$(msf_env optimize --modsec-enforce --force)
+if echo "$msf_own" | grep -qi "no tool-managed" \
+    && grep -qE '^SecRuleEngine[[:space:]]+DetectionOnly' "$MSF_INC" 2>/dev/null \
+    && ! grep -qE '^SecRuleEngine On$' "$MSF_INC" 2>/dev/null; then
+    log_pass "modsec-enforce: refuses to flip a config without the managed marker (ownership proof)"
+else
+    log_fail "modsec-enforce: flipped or mis-handled a non-tool-managed config"
+fi
+
+# Multi-line guard: a hand-edited includes with two SecRuleEngine lines is refused
+# (could otherwise leave a mixed On + DetectionOnly file).
+msf_env optimize --modsec --force >/dev/null
+printf 'SecRuleEngine DetectionOnly\n' >> "$MSF_INC"
+msf_multi=$(msf_env optimize --modsec-enforce --force)
+if echo "$msf_multi" | grep -qi "exactly one SecRuleEngine" \
+    && ! grep -qE '^SecRuleEngine On$' "$MSF_INC" 2>/dev/null; then
+    log_pass "modsec-enforce: refuses when the includes file has multiple SecRuleEngine lines"
+else
+    log_fail "modsec-enforce: did not refuse a multi-engine-line includes file"
+fi
+
+# Enterprise: --modsec-enforce must NOT silently succeed — it refuses (nothing flipped).
+MSE_FIX="${TEST_TMP}/mse-ent-fix"; MSE_DATA="${TEST_TMP}/mse-ent-data"
+mkdir -p "$MSE_DATA"; cp -R "${CONFIGS_DIR}/cpanel-enterprise" "$MSE_FIX"; mkdir -p "$MSE_FIX/etc/php.d"
+mse_ent=$(LSO_DATA_DIR="$MSE_DATA" LSO_FS_ROOT="$MSE_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MSE_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --modsec-enforce --force 2>&1 || true)
+if echo "$mse_ent" | grep -qi "no tool-managed" \
+    && [ ! -f "$MSE_FIX/usr/local/lsws/conf/modsec/modsec_includes.conf" ]; then
+    log_pass "modsec-enforce: on Enterprise/non-OLS it refuses (no silent success, nothing written)"
+else
+    log_fail "modsec-enforce: Enterprise enforce did not refuse cleanly"
+fi
+
 ################################################################################
 # SECTION 16: Analyze (scored audit)
 ################################################################################
