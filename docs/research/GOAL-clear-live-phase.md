@@ -4,6 +4,12 @@
 merged (offline code) or explicitly parked on a named user blocker. One item = one grok-reviewed PR,
 following the proven workflow below.
 
+> **✅ STATUS (2026-07-02): OFFLINE PHASE CLEARED.** All five items are merged, grok-reviewed, CI green:
+> Item 1 fail2ban (PR #37), Item 2 ModSecurity DetectionOnly (#39), Item 4 `--modsec-enforce` (#40),
+> Item 3 reCAPTCHA staged-disabled (#41), Item 5 QUIC.cloud `quic-assist` (#42). Suite 405/0/0 on
+> bash 3.2 + 5. Nothing further is buildable offline. The only residue is the user-authorized live
+> ACTIVATIONS below (arm fail2ban; reCAPTCHA v2 keys; QUIC.cloud account + registrar DNS).
+
 ## Honest scope: what CAN vs CANNOT be auto-cleared
 The list is NOT fully closable without you. Split:
 
@@ -29,19 +35,19 @@ Merged to main, all CI green (Bash Syntax macos and ubuntu, Shellcheck, Portabil
 macos and ubuntu, Docker E2E), grok-reviewed with findings folded, test count only rising, opt-in
 and default-off, DetectionOnly/disabled on first apply, backup+rollback covers any new state.
 
-## Ordered execution (each its own PR)
-1. **Item 2** — `lib/features/modsec.sh`, opt-in `--modsec`, DetectionOnly + CRS 4.x + WP exclusion
-   plugin + pre-seeded Woo exclusions; preflight (module .so load, CRS parse via error-log tail,
-   sized+rotated audit log); package state in manifest; if it writes a logrotate drop-in, add that
-   path to the backup loop. Never enforce.
-2. **Item 4** — `--modsec-enforce` flag, refuses unless engine is already DetectionOnly, gated on a
-   printed FP summary acknowledge; verified rollback on any restart/health/smoke failure.
-3. **Item 3** — promote the reCAPTCHA stub to an apply path written `enabled 0` + a separate
-   `--recaptcha-enable`; wire arg-parse + registry. Parks on your keys (task #246).
-4. **Item 5** — QUIC.cloud wp-cli assist (LSCWP baseline, Domain Key request, read link status),
-   print the CNAME target and STOP. Woo cart-cookie cache-exclusion preflight. Parks on your account.
-5. **Live residue** — a checklist for you: window + arm Item 1, provide reCAPTCHA keys, QUIC.cloud
-   account + DNS, and authorize each live `optimize` run (backs up + dry-runs first).
+## Ordered execution (each its own PR) — ALL DONE
+1. ✅ **Item 2 (PR #39)** — `lib/features/modsec.sh`, opt-in `--modsec`, DetectionOnly + CRS 4.x + WP
+   exclusion plugin + pre-seeded Woo exclusions; preflight (module .so load, CRS parse via error-log
+   tail, sized+rotated audit log); package state in manifest; logrotate drop-in in the backup loop.
+2. ✅ **Item 4 (PR #40)** — `--modsec-enforce` flag, refuses unless engine is already DetectionOnly,
+   gated on a printed FP summary acknowledge; verified rollback on any restart/health/smoke failure.
+3. ✅ **Item 3 (PR #41)** — promoted the reCAPTCHA stub to an apply path writing `enabled 0` + a separate
+   `--recaptcha-enable`; arg-parse + registry wired. Parks on your keys (task #266).
+4. ✅ **Item 5 (PR #42)** — read-only `quic-assist` subcommand (LSCWP baseline preflight, analyze danger
+   gate, print the CNAME/nameserver target and STOP; never auto-DNS). Parks on your account + DNS (#267).
+   (Also ✅ **Item 1 (PR #37)** fail2ban, built earlier in the arc.)
+5. **Live residue (all that's left)** — a checklist for you: window + arm Item 1, provide reCAPTCHA keys
+   (#266), QUIC.cloud account + DNS (#267), and authorize each live `optimize` run (backs up + dry-runs first).
 
 ## Proven workflow (FOLLOW EXACTLY — ~15 PRs, incl. #37)
 - Implement, mirroring `lib/features/fail2ban.sh` (newest template: opt-in gate, guarded live-only
