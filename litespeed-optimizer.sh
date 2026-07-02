@@ -81,6 +81,14 @@ LSO_MODSEC="${LSO_MODSEC:-}"
 # DEPLOYED DetectionOnly config to SecRuleEngine On. Read as ${LSO_MODSEC_ENFORCE:-}.
 # shellcheck disable=SC2034  # consumed by lib/features/modsec.sh
 LSO_MODSEC_ENFORCE="${LSO_MODSEC_ENFORCE:-}"
+# reCAPTCHA opt-in gate (set by --recaptcha, or via env). Read as ${LSO_RECAPTCHA:-}
+# by lib/features/recaptcha.sh. Stages the OLS lsrecaptcha block DISABLED; never arms.
+# shellcheck disable=SC2034  # consumed by lib/features/recaptcha.sh
+LSO_RECAPTCHA="${LSO_RECAPTCHA:-}"
+# reCAPTCHA arm flip (--recaptcha-enable). Distinct from --recaptcha; flips a staged
+# DISABLED block to enabled 1 + writes keys. Read as ${LSO_RECAPTCHA_ENABLE:-}.
+# shellcheck disable=SC2034  # consumed by lib/features/recaptcha.sh
+LSO_RECAPTCHA_ENABLE="${LSO_RECAPTCHA_ENABLE:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the REGISTERED features (lib/features/*.sh); keep this list in
@@ -97,6 +105,7 @@ ALLOWED_FEATURES=(
     "security" "headers" "throttling"
     "fail2ban" "f2b"
     "modsec" "modsecurity" "waf"
+    "recaptcha" "captcha"
 )
 
 ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
@@ -375,6 +384,11 @@ OPTIONS:
                                 DetectionOnly (never enforces), opt-in
     --modsec-enforce            flip a DEPLOYED DetectionOnly ModSecurity to
                                 enforcing (SecRuleEngine On); gated, opt-in
+    --recaptcha                 stage OLS CAPTCHA protection (lsrecaptcha)
+                                DISABLED (never arms), opt-in
+    --recaptcha-enable          arm a staged lsrecaptcha block (enabled 1 +
+                                keys); needs LSO_RECAPTCHA_SITE_KEY /
+                                LSO_RECAPTCHA_SECRET_KEY; gated, opt-in
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -391,6 +405,8 @@ FEATURES (use with --feature / --exclude):
                                 (opt-in via --fail2ban; NOT in default profiles)
     modsec                      ModSecurity v3 + OWASP CRS in DetectionOnly
                                 (opt-in via --modsec; NOT in default profiles)
+    recaptcha                   OLS CAPTCHA protection (lsrecaptcha), staged
+                                disabled (opt-in via --recaptcha; NOT in profiles)
 
     Planned (not yet implemented; see ROADMAP.md): http3 · redis tuning ·
     mariadb buffer pool · os-limits (systemd/sysctl)
@@ -892,6 +908,21 @@ parse_arguments() {
                 export LSO_MODSEC=1
                 export LSO_MODSEC_ENFORCE=1
                 [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="modsec"
+                shift
+                ;;
+            --recaptcha)
+                # Opt-in: stage the OLS lsrecaptcha block DISABLED (never arms).
+                # Also select the feature (not in any default profile) unless named.
+                export LSO_RECAPTCHA=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="recaptcha"
+                shift
+                ;;
+            --recaptcha-enable)
+                # Distinct, gated arm of a staged DISABLED block to enabled 1 + keys.
+                # Implies --recaptcha; refuses unless staged AND both keys are in env.
+                export LSO_RECAPTCHA=1
+                export LSO_RECAPTCHA_ENABLE=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="recaptcha"
                 shift
                 ;;
             --trusted-ip)
