@@ -1,9 +1,12 @@
 # litespeed-optimizer — LIVE-SERVER phase plan v2 (grok-reviewed; nothing applied yet)
 
-**Status:** draft for Marcin's review, revised after an independent grok critique. NO changes to
-`lsdemo` or any live box have been made. Offline roadmap is complete at v0.8.0. This plan covers the
-deferred live-server items: ModSecurity/OWASP CRS, fail2ban, reCAPTCHA (lsrecaptcha), QUIC.cloud
-onboarding, plus the Plesk/ADC panel gap and two SHARED code prerequisites the live items depend on.
+**Status: OFFLINE SCAFFOLDING COMPLETE — Items 1–5 all MERGED** (PRs #37, #39, #40, #41, #42;
+grok-reviewed, CI green, suite 405/0/0 on bash 3.2 + 5). NO changes to `lsdemo` or any live box have
+been made. Everything buildable offline is now on `main`; the only residue is the user-authorized
+live ACTIVATIONS (arm fail2ban; provide reCAPTCHA v2 keys; QUIC.cloud account + registrar DNS).
+Original plan (revised after an independent grok critique) covered the deferred live-server items:
+ModSecurity/OWASP CRS, fail2ban, reCAPTCHA (lsrecaptcha), QUIC.cloud onboarding, plus the Plesk/ADC
+panel gap and two SHARED code prerequisites the live items depend on.
 
 ## Item 0 — OFFLINE FOUNDATION: DONE (PRs #32–#35, merged, grok-reviewed, 337→354 tests)
 - **0a** (PR #32) managed-panel detection (Plesk/ADC/Enhance/aaPanel/CloudPanel/Hestia/ISPConfig) →
@@ -88,7 +91,7 @@ interactions to document and guard:
   offline. These are the foundation; nothing live runs until they are merged.
 
 ## Item 1 — fail2ban (now BEFORE reCAPTCHA; affects only offenders, dry-run first)
-**STATUS: IN PROGRESS (this PR) — offline build.** `lib/features/fail2ban.sh` added: opt-in
+**STATUS: MERGED (PR #37) — offline build.** `lib/features/fail2ban.sh` added: opt-in
 `--fail2ban` (jails DISABLED) + `--fail2ban-enable` (arm). Decisions taken this build:
 - failregex pinned to OpenLiteSpeed's documented default combined access-log format with a synthetic
   fixture line; the real-line pin + `fail2ban-regex` run are a guarded live-only step (deferred to
@@ -129,7 +132,7 @@ interactions to document and guard:
 - **Top risk:** self-DoS (ban the CDN edge or the admin). Mitigations above + the smoke gate.
 
 ## Item 2 — ModSecurity v3 + OWASP CRS, DetectionOnly only (the big one)
-**STATUS: IN PROGRESS (this PR) — offline build.** `lib/features/modsec.sh` added: opt-in `--modsec`,
+**STATUS: MERGED (PR #39) — offline build.** `lib/features/modsec.sh` added: opt-in `--modsec`,
 DetectionOnly by construction (SecRuleEngine DetectionOnly lives in an owned includes file referenced
 by `modsecurity_rules_file`; the module block carries only ls_enabled/modsecurity/rules_file). Owned
 files under `conf/modsec/` (backed up with the conf tree): includes + WP-exclusion-plugin enable +
@@ -164,6 +167,13 @@ are guarded live-only. Enterprise + panel-restricted → manual-only. Enforce fl
   DetectionOnly mandatory, PL1, smoke gate, verified rollback, separate enforce flag.
 
 ## Item 3 — reCAPTCHA (lsrecaptcha) — staged disabled first
+**STATUS: MERGED (PR #41) — offline build.** `lib/features/recaptcha.sh` added: opt-in `--recaptcha`
+stages the server-level `lsrecaptcha {}` block `enabled 0` (v2 Checkbox `type 1`, conservative
+regConnLimit/sslConnLimit/maxTries, search-bot + payment-webhook `botWhiteList`, no keys). A separate
+`--recaptcha-enable` arms it (`enabled 1` + keys) but REFUSES unless a tool-staged block exists AND both
+keys are in env (LSO_RECAPTCHA_SITE_KEY / LSO_RECAPTCHA_SECRET_KEY); the secret is never logged. Ownership
+fingerprint (the payment-webhook whitelist) gates arm + detect. Directive names verified against a live
+OLS 1.9.0 WebAdmin schema. Suite 396 green (bash 3.2 + 5), shellcheck clean.
 - Promote the existing advisory stub to an apply path (the `--recaptcha` flag is documented but currently
   unparsed — arg-parse + registry wiring is part of THIS PR). First run writes the lsrecaptcha block with
   conservative connection-limit triggers (regConnLimit / sslConnLimit / maxTries) and a search-bot +
@@ -176,7 +186,7 @@ are guarded live-only. Enterprise + panel-restricted → manual-only. Enforce fl
   limits, explicit payment + crawler whitelist, keep off until tuned.
 
 ## Item 4 — ModSecurity enforce flip (separate, gated)
-**STATUS: IN PROGRESS (this PR) — offline build.** `--modsec-enforce` added to `lib/features/modsec.sh`:
+**STATUS: MERGED (PR #40) — offline build.** `--modsec-enforce` added to `lib/features/modsec.sh`:
 implies `--modsec`, and `_ms_enforce_flip` rewrites ONLY the `SecRuleEngine` line in the owned
 includes file (DetectionOnly → On) — the module block is untouched. Refuses unless ModSecurity is
 already deployed by this tool AND currently DetectionOnly; idempotent when already On; prints the
@@ -191,6 +201,14 @@ operator responsibilities (can't be verified offline). Suite 379 green (bash 3.2
   any restart/health/smoke failure.
 
 ## Item 5 — QUIC.cloud onboarding (assist-only; user does account + DNS)
+**STATUS: MERGED (PR #42) — offline build.** Read-only `quic-assist` subcommand added
+(`litespeed-optimizer-lib/quic-assist.sh`): wp-cli preflight (LSCWP active, cart/session-cookie cache
+correctness via `lscwp_check_vary_cookies`, crawler) + a danger gate that reuses the local `run_analyze`
+exit code (open danger → BLOCK). Only when the origin is clean does it read `qc-cname`/`qc-nameservers`
+back from LSCWP and print the exact CNAME/nameserver target, then STOP — never auto-DNS. Unlinked domain
+→ directs to the QUIC.cloud dashboard link step; reminds to keep payment webhooks reachable through the
+CDN. Account/ToS, Domain Key handshake, dashboard CDN settings, and the registrar DNS change stay manual.
+Suite 405 green (bash 3.2 + 5), shellcheck clean.
 - wp-cli assist: ensure LSCWP + baseline cache/crawler config, trigger the Domain Key request, read back
   link status — ONLY if the QUIC.cloud account already exists. Print the exact CNAME/nameserver target and
   STOP. Never auto-DNS.
