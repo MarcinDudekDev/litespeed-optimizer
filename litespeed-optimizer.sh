@@ -298,7 +298,7 @@ source_libraries() {
 
     # 4. Workflow libraries
     local lib
-    for lib in ui detector backup validator analyzer remote-analyzer optimizer benchmark exporter probe; do
+    for lib in ui detector backup validator analyzer remote-analyzer optimizer benchmark exporter probe quic-assist; do
         local lib_file="${LIB_DIR}/${lib}.sh"
         if [ -f "$lib_file" ]; then
             # shellcheck source=/dev/null
@@ -356,6 +356,11 @@ COMMANDS:
                                 the lsphp php.ini is writable (self-fix vs contact
                                 host, since opcache.* is PHP_INI_SYSTEM). Same
                                 token-guarded one-shot probe. --json, --basic-auth
+    quic-assist [site]          QUIC.cloud onboarding assist (read-only): preflight
+                                cache/Woo correctness, BLOCK on open 'analyze' danger
+                                findings, then print the exact CNAME/nameserver target
+                                and STOP. Never changes DNS or config. (Account + DNS
+                                are the operator's manual steps.)
     help                        Show this help message
 
 OPTIONS:
@@ -596,6 +601,16 @@ cmd_analyze() {
     fi
 }
 
+cmd_quic_assist() {
+    # Read-only preflight + QUIC.cloud onboarding guidance (never writes config/DNS).
+    if type -t run_quic_assist &>/dev/null; then
+        run_quic_assist
+    else
+        log_error "quic-assist library not loaded"
+        exit 1
+    fi
+}
+
 cmd_optimize() {
     # optimize restarts LiteSpeed and writes server config — require root unless
     # this is a dry-run or a fixture-tree test (LSO_FS_ROOT set).
@@ -824,7 +839,7 @@ parse_arguments() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            detect|check|analyze|optimize|rollback|status|benchmark|probe-redis|probe-opcache|export-profile|help)
+            detect|check|analyze|optimize|rollback|status|benchmark|probe-redis|probe-opcache|export-profile|quic-assist|help)
                 COMMAND="$1"
                 shift
                 ;;
@@ -1111,6 +1126,7 @@ main() {
         benchmark) cmd_benchmark ;;
         probe-redis) cmd_probe_redis ;;
         probe-opcache) cmd_probe_opcache ;;
+        quic-assist) cmd_quic_assist ;;
         help)      show_help ;;
         *)
             log_error "Unknown command: $COMMAND"
