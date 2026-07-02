@@ -2399,6 +2399,185 @@ else
 fi
 
 ################################################################################
+# SECTION 15f: reCAPTCHA Feature (LIVE-phase Item 3 — offline/fixture only)
+################################################################################
+log_section "reCAPTCHA Feature Tests"
+
+RC_FIX="${TEST_TMP}/rc-fix"
+RC_DATA="${TEST_TMP}/rc-data"
+mkdir -p "$RC_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$RC_FIX"
+mkdir -p "$RC_FIX/etc/php.d"
+RC_CONF="$RC_FIX/usr/local/lsws/conf/httpd_config.conf"
+rc_env() {
+    LSO_DATA_DIR="$RC_DATA" LSO_FS_ROOT="$RC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$RC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+# Extract the lsrecaptcha block (header written as "lsrecaptcha {" by ols_set).
+rc_block() { awk '/^lsrecaptcha[[:space:]]*\{/,/^\}/' "$RC_CONF"; }
+
+# Opt-in gate: selecting the feature WITHOUT --recaptcha must write nothing.
+rc_gate_out=$(rc_env optimize --feature recaptcha --force)
+if ! grep -qE '^lsrecaptcha[[:space:]]*\{' "$RC_CONF" && echo "$rc_gate_out" | grep -qi "pass --recaptcha"; then
+    log_pass "recaptcha: opt-in gate — nothing written without --recaptcha (guidance printed)"
+else
+    log_fail "recaptcha: wrote block or gate message missing without --recaptcha"
+fi
+
+# --recaptcha: stage the lsrecaptcha block DISABLED, v2 Checkbox, whitelist, no keys.
+rc_env optimize --recaptcha --force >/dev/null
+rc_ok=true
+rc_b=$(rc_block)
+echo "$rc_b" | grep -qE "enabled[[:space:]]+0" || { log_fail "recaptcha: 'enabled 0' missing from staged block"; rc_ok=false; }
+echo "$rc_b" | grep -qE "type[[:space:]]+1" || { log_fail "recaptcha: 'type 1' (v2 Checkbox) missing"; rc_ok=false; }
+echo "$rc_b" | grep -qE "maxTries[[:space:]]+3" || { log_fail "recaptcha: conservative maxTries missing"; rc_ok=false; }
+echo "$rc_b" | grep -qE "allowedRobotHits[[:space:]]+3" || { log_fail "recaptcha: allowedRobotHits missing"; rc_ok=false; }
+echo "$rc_b" | grep -qE "regConnLimit[[:space:]]+15000" || { log_fail "recaptcha: conservative regConnLimit missing"; rc_ok=false; }
+echo "$rc_b" | grep -qE "sslConnLimit[[:space:]]+10000" || { log_fail "recaptcha: conservative sslConnLimit missing"; rc_ok=false; }
+echo "$rc_b" | grep -qE "botWhiteList[[:space:]]+.*Googlebot" || { log_fail "recaptcha: botWhiteList missing search crawlers"; rc_ok=false; }
+echo "$rc_b" | grep -qE "botWhiteList[[:space:]]+.*Stripe" || { log_fail "recaptcha: botWhiteList missing payment webhooks"; rc_ok=false; }
+echo "$rc_b" | grep -qiE "siteKey|secretKey" && { log_fail "recaptcha: staged block must NOT carry keys"; rc_ok=false; }
+[ "$rc_ok" = true ] && log_pass "recaptcha: --recaptcha stages lsrecaptcha DISABLED (v2 Checkbox, conservative limits, crawler+payment whitelist, no keys)"
+
+# DANGER guard: 'enabled 1' must never be written by --recaptcha (staged = disabled).
+if rc_block | grep -qE "enabled[[:space:]]+1"; then
+    log_fail "recaptcha: SAFETY VIOLATION — 'enabled 1' written by --recaptcha (must stage disabled)"
+else
+    log_pass "recaptcha: never arms — no 'enabled 1' in the staged block (disabled by construction)"
+fi
+
+# Idempotent: re-apply keeps a single lsrecaptcha block.
+rc_env optimize --recaptcha --force >/dev/null
+if [ "$(grep -cE '^lsrecaptcha[[:space:]]*\{' "$RC_CONF")" = "1" ]; then
+    log_pass "recaptcha: idempotent (single lsrecaptcha block on re-apply)"
+else
+    log_fail "recaptcha: duplicated lsrecaptcha block on re-apply"
+fi
+
+# feature_detect_custom_recaptcha: true after the staged block is written.
+rc_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$RC_FIX"; export LSO_MAIN_CONF="$RC_CONF"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/recaptcha.sh"
+    if feature_detect_custom_recaptcha "$RC_CONF"; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$rc_detect" | grep -q "DETECT:yes"; then
+    log_pass "recaptcha: feature_detect recognizes the staged lsrecaptcha block"
+else
+    log_fail "recaptcha: feature_detect failed to recognize staged block: $rc_detect"
+fi
+
+# feature_detect on a bare fixture (no block) must be false.
+rc_detect_bare=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    RC_BARE="${TEST_TMP}/rc-bare"; cp -R "${CONFIGS_DIR}/plain-ols" "$RC_BARE"
+    export LSO_FS_ROOT="$RC_BARE"
+    RC_BARE_CONF="$RC_BARE/usr/local/lsws/conf/httpd_config.conf"; export LSO_MAIN_CONF="$RC_BARE_CONF"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/recaptcha.sh"
+    if feature_detect_custom_recaptcha "$RC_BARE_CONF"; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$rc_detect_bare" | grep -q "DETECT:no"; then
+    log_pass "recaptcha: feature_detect is false on a fixture without an lsrecaptcha block"
+else
+    log_fail "recaptcha: feature_detect false-positived on a bare fixture: $rc_detect_bare"
+fi
+
+# --recaptcha-enable WITHOUT keys must refuse (nothing armed, stays enabled 0).
+rc_nokeys=$(rc_env optimize --recaptcha-enable --force)
+if echo "$rc_nokeys" | grep -qi "both keys required" && rc_block | grep -qE "enabled[[:space:]]+0" \
+    && ! rc_block | grep -qE "enabled[[:space:]]+1"; then
+    log_pass "recaptcha-enable: refuses without keys (block stays enabled 0)"
+else
+    log_fail "recaptcha-enable: did not refuse cleanly without keys"
+fi
+
+# --recaptcha-enable WITH dummy keys arms the block (enabled 1 + keys written).
+rc_arm=$(LSO_DATA_DIR="$RC_DATA" LSO_FS_ROOT="$RC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    LSO_RECAPTCHA_SITE_KEY=test-site-key LSO_RECAPTCHA_SECRET_KEY=test-secret-key \
+    "${OPTIMIZER}" optimize --recaptcha-enable --force 2>&1 || true)
+rc_arm_b=$(rc_block)
+if echo "$rc_arm_b" | grep -qE "enabled[[:space:]]+1" \
+    && echo "$rc_arm_b" | grep -qE "siteKey[[:space:]]+test-site-key" \
+    && echo "$rc_arm_b" | grep -qE "secretKey[[:space:]]+test-secret-key"; then
+    log_pass "recaptcha-enable: arms with keys in env (enabled 1 + siteKey/secretKey written)"
+else
+    log_fail "recaptcha-enable: did not arm with dummy keys: $(echo "$rc_arm" | grep -i key)"
+fi
+
+# SECURITY: the secret key value must NEVER appear in the arm output/logs.
+if echo "$rc_arm" | grep -q "test-secret-key"; then
+    log_fail "recaptcha-enable: SECURITY — secretKey value leaked into logs"
+elif echo "$rc_arm" | grep -qi "secretKey = (redacted)"; then
+    log_pass "recaptcha-enable: secret key never logged (write reported redacted)"
+else
+    log_fail "recaptcha-enable: expected a redacted secretKey write log line"
+fi
+
+# Idempotent arm: re-running with keys is a no-op ("already armed").
+rc_arm_again=$(LSO_DATA_DIR="$RC_DATA" LSO_FS_ROOT="$RC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    LSO_RECAPTCHA_SITE_KEY=test-site-key LSO_RECAPTCHA_SECRET_KEY=test-secret-key \
+    "${OPTIMIZER}" optimize --recaptcha-enable --force 2>&1 || true)
+if echo "$rc_arm_again" | grep -qi "already armed" \
+    && [ "$(grep -cE '^lsrecaptcha[[:space:]]*\{' "$RC_CONF")" = "1" ]; then
+    log_pass "recaptcha-enable: idempotent (already armed -> no-op, single block)"
+else
+    log_fail "recaptcha-enable: not idempotent"
+fi
+
+# Re-running --recaptcha after an arm reverts to DISABLED (safe re-stage) and warns.
+rc_restage=$(rc_env optimize --recaptcha --force)
+if rc_block | grep -qE "enabled[[:space:]]+0" && ! rc_block | grep -qE "enabled[[:space:]]+1" \
+    && echo "$rc_restage" | grep -qi "DISARMED"; then
+    log_pass "recaptcha: re-running --recaptcha reverts an armed block to enabled 0 + warns disarmed (safe re-stage)"
+else
+    log_fail "recaptcha: --recaptcha did not revert/warn on an armed block"
+fi
+
+# --recaptcha-enable on a FRESH fixture (never staged) refuses even WITH keys —
+# never arm a config this tool didn't stage (ownership fingerprint absent).
+RCF_FIX="${TEST_TMP}/rcf-fix"; RCF_DATA="${TEST_TMP}/rcf-data"
+mkdir -p "$RCF_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RCF_FIX"; mkdir -p "$RCF_FIX/etc/php.d"
+RCF_CONF="$RCF_FIX/usr/local/lsws/conf/httpd_config.conf"
+rcf_arm=$(LSO_DATA_DIR="$RCF_DATA" LSO_FS_ROOT="$RCF_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RCF_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    LSO_RECAPTCHA_SITE_KEY=test-site-key LSO_RECAPTCHA_SECRET_KEY=test-secret-key \
+    "${OPTIMIZER}" optimize --recaptcha-enable --force 2>&1 || true)
+if echo "$rcf_arm" | grep -qi "no tool-staged" \
+    && ! grep -qE '^lsrecaptcha[[:space:]]*\{' "$RCF_CONF"; then
+    log_pass "recaptcha-enable: refuses on a never-staged fixture even with keys (ownership fingerprint absent)"
+else
+    log_fail "recaptcha-enable: armed or mis-handled a never-staged config"
+fi
+
+# --recaptcha-enable on Enterprise must REFUSE (httpd_config.xml is manual-only) —
+# no silent success even with keys present.
+RCE_FIX="${TEST_TMP}/rce-fix"; RCE_DATA="${TEST_TMP}/rce-data"
+mkdir -p "$RCE_DATA"; cp -R "${CONFIGS_DIR}/cpanel-enterprise" "$RCE_FIX"; mkdir -p "$RCE_FIX/etc/php.d"
+rce_arm=$(LSO_DATA_DIR="$RCE_DATA" LSO_FS_ROOT="$RCE_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RCE_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    LSO_RECAPTCHA_SITE_KEY=test-site-key LSO_RECAPTCHA_SECRET_KEY=test-secret-key \
+    "${OPTIMIZER}" optimize --recaptcha-enable --force 2>&1 || true)
+if echo "$rce_arm" | grep -qiE "manual-only|no tool-staged" \
+    && ! echo "$rce_arm" | grep -qi "is now ARMED"; then
+    log_pass "recaptcha-enable: on Enterprise it refuses (no silent success, nothing armed)"
+else
+    log_fail "recaptcha-enable: Enterprise arm did not refuse cleanly"
+fi
+
+################################################################################
 # SECTION 16: Analyze (scored audit)
 ################################################################################
 log_section "Analyze Tests"

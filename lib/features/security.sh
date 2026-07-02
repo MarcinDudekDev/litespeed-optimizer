@@ -210,7 +210,7 @@ _sec_report_recaptcha() {
     log_info "reCAPTCHA protection: report-only (requires your site keys)"
     echo "  To enable: WebAdmin > Security > CAPTCHA (lsrecaptcha)"
     echo "  Recommended: Connection Limit slightly above normal peak so it actually triggers;"
-    echo "  keep Bot White List for Googlebot. Provide keys, then re-run with v0.2 --recaptcha."
+    echo "  keep Bot White List for Googlebot. Stage it with --recaptcha, then arm with --recaptcha-enable."
 }
 
 _sec_report_modsec() {
