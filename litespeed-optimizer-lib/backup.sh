@@ -321,6 +321,37 @@ restore_backup_files() {
             rsync -a --delete "$backup_path/mariadb/" "$(_bk_fs /etc/my.cnf.d)/"
         fi
     fi
+    # mariadb owned drop-in (99-woocommerce.cnf, Debian mariadb.conf.d / Debian
+    # mysql.conf.d / RHEL my.cnf.d path). The rsync --delete above already restores
+    # the exact pre-run state of the conf.d dir it targeted — but the mariadb feature
+    # may write to a dir the restore above did NOT target (e.g. mysql.conf.d or
+    # my.cnf.d when mariadb.conf.d also exists), leaving our added file behind. Mirror
+    # the os-limits/modsec-logrotate rule: if the backup predates our marker-carrying
+    # file (this run added it), remove it (marker-guarded — never touch an identically-
+    # named file an operator created). Sweep ALL THREE distro layouts so a file we
+    # created this run under any of them is removable on rollback. NEVER rmdir the
+    # conf.d dir — mariadb.conf.d / mysql.conf.d / my.cnf.d are shared system dirs.
+    #
+    # KNOWN LIMITATION (M5): create_backup flattens every backed-up conf.d tree into a
+    # single backup/mariadb/ namespace and restore_backup_files reconciles Debian-first
+    # (mariadb.conf.d, else my.cnf.d). On the rare host with MULTIPLE conf.d dirs a
+    # backed-up file could be restored into the wrong dir — dual-layout hosts are not
+    # fully supported. The marker-guarded cleanup below still removes any file THIS run
+    # added, so a run is always undone; only pre-existing dual-layout content is at risk.
+    local _mdb_f
+    for _mdb_f in \
+        "$(_bk_fs /etc/mysql/mariadb.conf.d/99-woocommerce.cnf)" \
+        "$(_bk_fs /etc/mysql/mysql.conf.d/99-woocommerce.cnf)" \
+        "$(_bk_fs /etc/my.cnf.d/99-woocommerce.cnf)"; do
+        [ -f "$_mdb_f" ] || continue
+        grep -q "Managed by litespeed-optimizer" "$_mdb_f" 2>/dev/null || continue
+        # Captured in the backup? (the conf.d dir was backed up WITH our file, i.e. it
+        # pre-existed this run) — then leave it; the rsync above already reconciled it.
+        # Only remove when the backup did NOT carry it, i.e. this run introduced it.
+        [ -f "$backup_path/mariadb/99-woocommerce.cnf" ] && continue
+        log_info "Removing ${_mdb_f#"${LSO_FS_ROOT:-}"} (mariadb drop-in added during the rolled-back run) ..."
+        rm -f "$_mdb_f"
+    done
     if [ -d "$backup_path/fail2ban" ] && [ -d "$(_bk_fs /etc/fail2ban)" ]; then
         log_info "Restoring /etc/fail2ban ..."
         rsync -a --delete "$backup_path/fail2ban/" "$(_bk_fs /etc/fail2ban)/"
