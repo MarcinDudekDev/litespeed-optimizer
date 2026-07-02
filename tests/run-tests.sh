@@ -2727,6 +2727,123 @@ else
 fi
 
 ################################################################################
+# SECTION 16b: quic-assist (QUIC.cloud onboarding preflight — LIVE Item 5, offline)
+################################################################################
+log_section "quic-assist Tests"
+
+QC_FIX="${TEST_TMP}/qc-fix"; QC_DATA="${TEST_TMP}/qc-data"
+mkdir -p "$QC_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$QC_FIX"; mkdir -p "$QC_FIX/etc/php.d"
+# Self-contained wp-cli mock: canned values driven by WP_MOCK_* env vars.
+QC_WP="${TEST_TMP}/qc-bin/wp"; mkdir -p "${TEST_TMP}/qc-bin"
+cat > "$QC_WP" <<'QCMOCK'
+#!/bin/bash
+args="$*"
+case "$args" in
+    *"plugin is-active litespeed-cache"*) exit "${WP_MOCK_NO_LSCWP:-0}" ;;
+    *"plugin is-active woocommerce"*)     exit "${WP_MOCK_NO_WOO:-0}" ;;
+    *"litespeed-option get cache-exc_cookies"*) echo "${WP_MOCK_EXC_COOKIES:-}"; exit 0 ;;
+    *"litespeed-option get crawler"*)     echo "${WP_MOCK_CRAWLER:-1}"; exit 0 ;;
+    *"litespeed-option get qc-cname"*)    echo "${WP_MOCK_QC_CNAME:-}"; exit 0 ;;
+    *"litespeed-option get qc-nameservers"*) echo "${WP_MOCK_QC_NS:-}"; exit 0 ;;
+    *"litespeed-option get cdn-quic"*)    echo "${WP_MOCK_CDN_QUIC:-0}"; exit 0 ;;
+    *"litespeed-option get cache-ttl_pub"*) echo "604800"; exit 0 ;;
+    *"option get siteurl"*)               echo "http://example.com"; exit 0 ;;
+    *"option get home"*)                  echo "http://example.com"; exit 0 ;;
+    *) exit 0 ;;
+esac
+QCMOCK
+chmod +x "$QC_WP"
+qc_env() {
+    env "$@" LSO_WP_BIN="$QC_WP" LSO_DATA_DIR="$QC_DATA" LSO_FS_ROOT="$QC_FIX" \
+        LSO_RAM_MB=4096 LSO_CORES=4 LSO_PHP_INI_SCAN_DIR="$QC_FIX/etc/php.d" LSO_SKIP_RESTART=1 \
+        "${OPTIMIZER}" quic-assist 2>&1 || true
+}
+
+# Clean origin + linked domain -> preflight passes and prints the exact CNAME target.
+qc_pass=$(qc_env WP_MOCK_QC_CNAME="example.com.qc.cdn")
+if echo "$qc_pass" | grep -qi "preflight PASSED" \
+    && echo "$qc_pass" | grep -qE "CNAME[[:space:]]+->[[:space:]]+example\.com\.qc\.cdn" \
+    && ! echo "$qc_pass" | grep -qi "PREFLIGHT FAILED"; then
+    log_pass "quic-assist: clean origin + linked domain -> passes and prints the CNAME target"
+else
+    log_fail "quic-assist: clean/linked path did not pass or print the CNAME"
+fi
+
+# NEVER auto-DNS: the output must explicitly disclaim changing DNS (rule 3).
+if echo "$qc_pass" | grep -qi "never changes DNS" && echo "$qc_pass" | grep -qi "at your registrar YOURSELF"; then
+    log_pass "quic-assist: prints the target but disclaims touching DNS (never auto-DNS)"
+else
+    log_fail "quic-assist: missing the never-auto-DNS disclaimer"
+fi
+
+# Payment-webhook allowlist reminder is surfaced (cross-cutting rule 6).
+if echo "$qc_pass" | grep -qi "Stripe/PayPal/Mollie"; then
+    log_pass "quic-assist: reminds to keep payment webhooks reachable through the CDN"
+else
+    log_fail "quic-assist: missing payment-webhook reachability reminder"
+fi
+
+# Cart cookie wrongly in Do-Not-Cache -> BLOCK (never hand out the DNS target).
+qc_cart=$(qc_env WP_MOCK_EXC_COOKIES="woocommerce_items_in_cart,wp_first" WP_MOCK_QC_CNAME="x.qc.cdn")
+if echo "$qc_cart" | grep -qi "PREFLIGHT FAILED" \
+    && echo "$qc_cart" | grep -qi "woocommerce_items_in_cart" \
+    && ! echo "$qc_cart" | grep -qi "preflight PASSED" \
+    && ! echo "$qc_cart" | grep -qE "CNAME[[:space:]]+->"; then
+    log_pass "quic-assist: blocks when the cart cookie is wrongly excluded from cache (no DNS target printed)"
+else
+    log_fail "quic-assist: did not block on the cart-cookie danger"
+fi
+
+# LSCWP not active -> BLOCK.
+qc_nolscwp=$(qc_env WP_MOCK_NO_LSCWP=1 WP_MOCK_QC_CNAME="x.qc.cdn")
+if echo "$qc_nolscwp" | grep -qi "PREFLIGHT FAILED" \
+    && echo "$qc_nolscwp" | grep -qi "LiteSpeed Cache plugin is NOT active" \
+    && ! echo "$qc_nolscwp" | grep -qE "CNAME[[:space:]]+->"; then
+    log_pass "quic-assist: blocks when the LiteSpeed Cache plugin is not active"
+else
+    log_fail "quic-assist: did not block when LSCWP inactive"
+fi
+
+# An open analyze DANGER (server-wide enableCache 1) blocks even with a clean cart cookie.
+QC_DFIX="${TEST_TMP}/qc-dfix"; QC_DDATA="${TEST_TMP}/qc-ddata"
+mkdir -p "$QC_DDATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$QC_DFIX"; mkdir -p "$QC_DFIX/etc/php.d"
+# Inject a server-wide cache-everything danger: enableCache 1 INSIDE module cache {}.
+QC_DCONF="$QC_DFIX/usr/local/lsws/conf/httpd_config.conf"
+awk '/^module cache[[:space:]]*\{/{print; print "  enableCache             1"; next} {print}' \
+    "$QC_DCONF" > "${QC_DCONF}.x" && mv "${QC_DCONF}.x" "$QC_DCONF"
+qc_danger=$(env WP_MOCK_QC_CNAME="x.qc.cdn" LSO_WP_BIN="$QC_WP" LSO_DATA_DIR="$QC_DDATA" \
+    LSO_FS_ROOT="$QC_DFIX" LSO_RAM_MB=4096 LSO_CORES=4 LSO_PHP_INI_SCAN_DIR="$QC_DFIX/etc/php.d" \
+    LSO_SKIP_RESTART=1 "${OPTIMIZER}" quic-assist 2>&1 || true)
+if echo "$qc_danger" | grep -qi "PREFLIGHT FAILED" \
+    && echo "$qc_danger" | grep -qi "open DANGER findings" \
+    && ! echo "$qc_danger" | grep -qE "CNAME[[:space:]]+->"; then
+    log_pass "quic-assist: blocks on an open analyze danger (server-wide cache-everything)"
+else
+    log_fail "quic-assist: did not block on an open analyze danger"
+fi
+
+# Clean origin but domain NOT linked (no qc-cname/qc-nameservers) -> pass preflight,
+# but tell the operator to link in the QUIC.cloud dashboard first (no target invented).
+qc_unlinked=$(qc_env)
+if echo "$qc_unlinked" | grep -qi "preflight PASSED" \
+    && echo "$qc_unlinked" | grep -qi "not linked to QUIC.cloud" \
+    && ! echo "$qc_unlinked" | grep -qE "CNAME[[:space:]]+->"; then
+    log_pass "quic-assist: clean but unlinked -> passes and directs to link in the dashboard first"
+else
+    log_fail "quic-assist: unlinked path did not guide to dashboard linking"
+fi
+
+# wp-cli unavailable -> refuses cleanly (the preflight reads LSCWP via wp-cli).
+qc_nowp=$(env LSO_WP_BIN=/nonexistent LSO_DATA_DIR="$QC_DATA" LSO_FS_ROOT="$QC_FIX" \
+    LSO_RAM_MB=4096 LSO_CORES=4 LSO_PHP_INI_SCAN_DIR="$QC_FIX/etc/php.d" LSO_SKIP_RESTART=1 \
+    "${OPTIMIZER}" quic-assist 2>&1 || true)
+if echo "$qc_nowp" | grep -qi "wp-cli not available" && ! echo "$qc_nowp" | grep -qE "CNAME[[:space:]]+->"; then
+    log_pass "quic-assist: refuses when wp-cli is unavailable"
+else
+    log_fail "quic-assist: did not refuse without wp-cli"
+fi
+
+################################################################################
 # SECTION 17: Benchmark (local test server)
 ################################################################################
 log_section "Benchmark Tests"
