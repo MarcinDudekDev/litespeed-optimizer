@@ -94,12 +94,17 @@ LSO_RECAPTCHA_ENABLE="${LSO_RECAPTCHA_ENABLE:-}"
 # OS-level only (never httpd_config), default-off.
 # shellcheck disable=SC2034  # consumed by lib/features/os-limits.sh
 LSO_OS_LIMITS="${LSO_OS_LIMITS:-}"
+# mariadb opt-in gate (set by --mariadb, or via env). Read as ${LSO_MARIADB:-}
+# by lib/features/mariadb.sh. Writes a MariaDB InnoDB tuning drop-in (DB config
+# only, never httpd_config), default-off.
+# shellcheck disable=SC2034  # consumed by lib/features/mariadb.sh
+LSO_MARIADB="${LSO_MARIADB:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the REGISTERED features (lib/features/*.sh); keep this list in
-# sync with feature_register calls. Roadmap-only features (http3, redis-tuning,
-# mariadb) are intentionally NOT here — accepting them would pass validation and
-# then fail at apply with "Feature not available".
+# sync with feature_register calls. Roadmap-only features (http3, redis-tuning)
+# are intentionally NOT here — accepting them would pass validation and then fail
+# at apply with "Feature not available".
 ALLOWED_FEATURES=(
     "server-tuning" "tuning"
     "lsapi-tuning" "lsapi" "php-workers"
@@ -112,6 +117,7 @@ ALLOWED_FEATURES=(
     "modsec" "modsecurity" "waf"
     "recaptcha" "captcha"
     "os-limits" "oslimits"
+    "mariadb" "mysql" "db"
 )
 
 ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
@@ -403,6 +409,9 @@ OPTIONS:
     --os-limits                 write OS connection-limit drop-ins (systemd
                                 LimitNOFILE=65535 + /etc/sysctl.d tuning),
                                 opt-in (default: off)
+    --mariadb                   write a MariaDB InnoDB tuning drop-in
+                                (99-woocommerce.cnf; RAM-tier buffer pool),
+                                opt-in (default: off)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -424,9 +433,11 @@ FEATURES (use with --feature / --exclude):
     os-limits                   OS connection limits — systemd LimitNOFILE=65535
                                 + sysctl tuning (opt-in via --os-limits; NOT in
                                 default profiles)
+    mariadb                     MariaDB InnoDB tuning for WooCommerce/WordPress —
+                                RAM-tier buffer pool (opt-in via --mariadb; NOT in
+                                default profiles)
 
-    Planned (not yet implemented; see ROADMAP.md): http3 · redis tuning ·
-    mariadb buffer pool
+    Planned (not yet implemented; see ROADMAP.md): http3 · redis tuning
 
 EXAMPLES:
     # Detect environment (edition, panel, paths)
@@ -957,6 +968,13 @@ parse_arguments() {
                 # OS-level only; also select the feature (not in any default profile).
                 export LSO_OS_LIMITS=1
                 [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="os-limits"
+                shift
+                ;;
+            --mariadb|--mysql)
+                # Opt-in: write the MariaDB InnoDB tuning drop-in (99-woocommerce.cnf).
+                # DB config only; also select the feature (not in any default profile).
+                export LSO_MARIADB=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="mariadb"
                 shift
                 ;;
             --trusted-ip)

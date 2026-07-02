@@ -2782,6 +2782,300 @@ else
 fi
 
 ################################################################################
+# SECTION 15h: mariadb Feature (InnoDB tuning drop-in; offline/fixture only)
+################################################################################
+log_section "mariadb Feature Tests"
+
+MDB_FIX="${TEST_TMP}/mdb-fix"
+MDB_DATA="${TEST_TMP}/mdb-data"
+mkdir -p "$MDB_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$MDB_FIX"
+mkdir -p "$MDB_FIX/etc/php.d"
+mkdir -p "$MDB_FIX/etc/mysql/mariadb.conf.d"   # seed the Debian conf.d dir
+MDB_CNF="$MDB_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf"
+mdb_env() {
+    LSO_DATA_DIR="$MDB_DATA" LSO_FS_ROOT="$MDB_FIX" LSO_RAM_MB="${MDB_RAM:-4096}" LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$MDB_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+
+# 1. Opt-in gate: selecting the feature WITHOUT --mariadb must write nothing.
+mdb_gate_out=$(mdb_env optimize --feature mariadb --force)
+if [ ! -f "$MDB_CNF" ] && echo "$mdb_gate_out" | grep -qi "pass --mariadb"; then
+    log_pass "mariadb: opt-in gate — nothing written without --mariadb (guidance printed)"
+else
+    log_fail "mariadb: wrote a file or gate message missing without --mariadb"
+fi
+
+# 2. --mariadb writes 99-woocommerce.cnf with marker + fixed keys + tier-correct pool (4g).
+MDB_RAM=4096 mdb_env optimize --mariadb --force >/dev/null
+mdb_ok=true
+[ -f "$MDB_CNF" ] || { log_fail "mariadb: 99-woocommerce.cnf not written"; mdb_ok=false; }
+grep -q "Managed by litespeed-optimizer" "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: file missing managed marker"; mdb_ok=false; }
+grep -qE '^\[mysqld\]' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: [mysqld] section missing"; mdb_ok=false; }
+grep -qE '^innodb_flush_method=O_DIRECT' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: O_DIRECT missing"; mdb_ok=false; }
+grep -qE '^innodb_flush_log_at_trx_commit=1' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: trx_commit=1 missing"; mdb_ok=false; }
+grep -qE '^slow_query_log=1' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: slow_query_log missing"; mdb_ok=false; }
+grep -qE '^long_query_time=0.5' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: long_query_time missing"; mdb_ok=false; }
+grep -qE '^innodb_buffer_pool_size=1G' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: 4g buffer pool != 1G"; mdb_ok=false; }
+grep -qE '^innodb_log_file_size=256M' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: 4g log file != 256M"; mdb_ok=false; }
+[ "$mdb_ok" = true ] && log_pass "mariadb: --mariadb writes 99-woocommerce.cnf with marker, [mysqld], fixed keys, and the 4g tier pool (1G) + log (256M)"
+
+# 3. A second RAM tier (1g) -> pool 256M / log 64M.
+MDB1_FIX="${TEST_TMP}/mdb1-fix"; MDB1_DATA="${TEST_TMP}/mdb1-data"
+mkdir -p "$MDB1_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MDB1_FIX"; mkdir -p "$MDB1_FIX/etc/php.d"
+mkdir -p "$MDB1_FIX/etc/mysql/mariadb.conf.d"
+LSO_DATA_DIR="$MDB1_DATA" LSO_FS_ROOT="$MDB1_FIX" LSO_RAM_MB=1024 LSO_CORES=2 \
+    LSO_PHP_INI_SCAN_DIR="$MDB1_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --mariadb --force >/dev/null 2>&1 || true
+MDB1_CNF="$MDB1_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf"
+[ -f "$MDB1_CNF" ] || log_fail "mariadb: 1g-tier 99-woocommerce.cnf not written"
+if [ -f "$MDB1_CNF" ] \
+    && grep -qE '^innodb_buffer_pool_size=256M' "$MDB1_CNF" 2>/dev/null \
+    && grep -qE '^innodb_log_file_size=64M' "$MDB1_CNF" 2>/dev/null; then
+    log_pass "mariadb: 1g tier -> buffer pool 256M + log file 64M"
+else
+    log_fail "mariadb: 1g tier pool/log values wrong"
+fi
+
+# 3b. (M10) 8g tier -> pool 2560M / log 640M.
+MDB8_FIX="${TEST_TMP}/mdb8-fix"; MDB8_DATA="${TEST_TMP}/mdb8-data"
+mkdir -p "$MDB8_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MDB8_FIX"; mkdir -p "$MDB8_FIX/etc/php.d"
+mkdir -p "$MDB8_FIX/etc/mysql/mariadb.conf.d"
+LSO_DATA_DIR="$MDB8_DATA" LSO_FS_ROOT="$MDB8_FIX" LSO_RAM_MB=8192 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MDB8_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --mariadb --force >/dev/null 2>&1 || true
+MDB8_CNF="$MDB8_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf"
+[ -f "$MDB8_CNF" ] || log_fail "mariadb: 8g-tier 99-woocommerce.cnf not written"
+if [ -f "$MDB8_CNF" ] \
+    && grep -qE '^innodb_buffer_pool_size=2560M' "$MDB8_CNF" 2>/dev/null \
+    && grep -qE '^innodb_log_file_size=640M' "$MDB8_CNF" 2>/dev/null; then
+    log_pass "mariadb: 8g tier -> buffer pool 2560M + log file 640M"
+else
+    log_fail "mariadb: 8g tier pool/log values wrong"
+fi
+
+# 4. Ownership-refuse: an UNMARKED pre-existing file must survive UNCHANGED.
+MDBH_FIX="${TEST_TMP}/mdbh-fix"; MDBH_DATA="${TEST_TMP}/mdbh-data"
+mkdir -p "$MDBH_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MDBH_FIX"; mkdir -p "$MDBH_FIX/etc/php.d"
+mkdir -p "$MDBH_FIX/etc/mysql/mariadb.conf.d"
+echo "innodb_buffer_pool_size=7M" > "$MDBH_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf"  # unmarked, operator-owned
+mdbh_out=$(LSO_DATA_DIR="$MDBH_DATA" LSO_FS_ROOT="$MDBH_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MDBH_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --mariadb --force 2>&1 || true)
+if echo "$mdbh_out" | grep -qi "refusing to overwrite" \
+    && grep -q "innodb_buffer_pool_size=7M" "$MDBH_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" \
+    && ! grep -q "Managed by litespeed-optimizer" "$MDBH_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf"; then
+    log_pass "mariadb: refuses to overwrite an unmarked operator file (content preserved)"
+else
+    log_fail "mariadb: clobbered or did not refuse an unmarked operator file"
+fi
+
+# 5. Idempotent: re-apply keeps a single clean file AND the full content bundle
+# survives (not just the single-line count) — marker, [mysqld], tier-correct pool,
+# O_DIRECT, trx_commit=1, slow_query_log.
+MDB_RAM=4096 mdb_env optimize --mariadb --force >/dev/null
+mdb_idem_ok=true
+[ "$(grep -cE '^innodb_buffer_pool_size' "$MDB_CNF")" = "1" ] || { log_fail "mariadb: duplicated innodb_buffer_pool_size on re-apply"; mdb_idem_ok=false; }
+grep -q "Managed by litespeed-optimizer" "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: marker lost on re-apply"; mdb_idem_ok=false; }
+grep -qE '^\[mysqld\]' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: [mysqld] lost on re-apply"; mdb_idem_ok=false; }
+grep -qE '^innodb_buffer_pool_size=1G' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: 4g pool (1G) lost on re-apply"; mdb_idem_ok=false; }
+grep -qE '^innodb_flush_method=O_DIRECT' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: O_DIRECT lost on re-apply"; mdb_idem_ok=false; }
+grep -qE '^innodb_flush_log_at_trx_commit=1' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: trx_commit=1 lost on re-apply"; mdb_idem_ok=false; }
+grep -qE '^slow_query_log=1' "$MDB_CNF" 2>/dev/null || { log_fail "mariadb: slow_query_log lost on re-apply"; mdb_idem_ok=false; }
+[ "$mdb_idem_ok" = true ] && log_pass "mariadb: idempotent (single clean file + full content bundle intact on re-apply)"
+
+# 6. feature_detect: yes on written config, no on a bare fixture (dir but no file).
+mdb_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$MDB_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/mariadb.sh"
+    if feature_detect_custom_mariadb; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+MDBN_FIX="${TEST_TMP}/mdbn-fix"; mkdir -p "$MDBN_FIX/etc/mysql/mariadb.conf.d"
+mdb_detect_bare=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$MDBN_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/mariadb.sh"
+    if feature_detect_custom_mariadb; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$mdb_detect" | grep -q "DETECT:yes" && echo "$mdb_detect_bare" | grep -q "DETECT:no"; then
+    log_pass "mariadb: feature_detect yes on written config, no on a bare fixture"
+else
+    log_fail "mariadb: feature_detect wrong (written=$mdb_detect bare=$mdb_detect_bare)"
+fi
+
+# 7. Panel-restricted host (DirectAdmin) -> manual-only, nothing written.
+MDBP_FIX="${TEST_TMP}/mdbp-fix"; MDBP_DATA="${TEST_TMP}/mdbp-data"
+mkdir -p "$MDBP_DATA"; cp -R "${CONFIGS_DIR}/directadmin" "$MDBP_FIX"; mkdir -p "$MDBP_FIX/etc/php.d"
+mkdir -p "$MDBP_FIX/etc/mysql/mariadb.conf.d"
+mdbp_out=$(LSO_DATA_DIR="$MDBP_DATA" LSO_FS_ROOT="$MDBP_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MDBP_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --mariadb --force 2>&1 || true)
+if echo "$mdbp_out" | grep -qi "manual-only" \
+    && [ ! -f "$MDBP_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" ]; then
+    log_pass "mariadb: panel-restricted (DirectAdmin) -> manual-only, nothing written"
+else
+    log_fail "mariadb: did not go manual-only on a panel-restricted host"
+fi
+
+# 8. No conf.d dir: remove the seeded dir -> returns cleanly (0), writes nothing, notes no dir.
+MDBX_FIX="${TEST_TMP}/mdbx-fix"; MDBX_DATA="${TEST_TMP}/mdbx-data"
+mkdir -p "$MDBX_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MDBX_FIX"; mkdir -p "$MDBX_FIX/etc/php.d"
+# deliberately NO mariadb.conf.d / my.cnf.d dir
+mdbx_out=$(LSO_DATA_DIR="$MDBX_DATA" LSO_FS_ROOT="$MDBX_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MDBX_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --mariadb --force 2>&1 || true)
+if echo "$mdbx_out" | grep -qi "no MariaDB conf.d directory found" \
+    && [ ! -f "$MDBX_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" ] \
+    && [ ! -f "$MDBX_FIX/etc/my.cnf.d/99-woocommerce.cnf" ]; then
+    log_pass "mariadb: no conf.d dir -> notes it and writes nothing (clean exit)"
+else
+    log_fail "mariadb: mishandled the no-conf.d-dir case"
+fi
+
+# 9. Dry-run writes nothing but still logs the intended write (via --dry-run flag).
+MDBD_FIX="${TEST_TMP}/mdbd-fix"; MDBD_DATA="${TEST_TMP}/mdbd-data"
+mkdir -p "$MDBD_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MDBD_FIX"; mkdir -p "$MDBD_FIX/etc/php.d"
+mkdir -p "$MDBD_FIX/etc/mysql/mariadb.conf.d"
+mdbd_out=$(LSO_DATA_DIR="$MDBD_DATA" LSO_FS_ROOT="$MDBD_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MDBD_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --mariadb --dry-run --force 2>&1 || true)
+if [ ! -f "$MDBD_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" ] \
+    && echo "$mdbd_out" | grep -q '\[DRY RUN\] Would write'; then
+    log_pass "mariadb: dry-run writes nothing but logs '[DRY RUN] Would write'"
+else
+    log_fail "mariadb: dry-run wrote a file or missing dry-run log"
+fi
+
+# 9b. (M9) RHEL layout: ONLY /etc/my.cnf.d exists (no mariadb.conf.d) -> the file is
+# written under my.cnf.d, carries the marker + buffer pool, and feature_detect finds it.
+MDBE_FIX="${TEST_TMP}/mdbe-fix"; MDBE_DATA="${TEST_TMP}/mdbe-data"
+mkdir -p "$MDBE_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MDBE_FIX"; mkdir -p "$MDBE_FIX/etc/php.d"
+mkdir -p "$MDBE_FIX/etc/my.cnf.d"   # RHEL conf.d only
+LSO_DATA_DIR="$MDBE_DATA" LSO_FS_ROOT="$MDBE_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MDBE_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --mariadb --force >/dev/null 2>&1 || true
+MDBE_CNF="$MDBE_FIX/etc/my.cnf.d/99-woocommerce.cnf"
+mdbe_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$MDBE_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/mariadb.sh"
+    if feature_detect_custom_mariadb; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if [ -f "$MDBE_CNF" ] \
+    && grep -q "Managed by litespeed-optimizer" "$MDBE_CNF" 2>/dev/null \
+    && grep -qE '^innodb_buffer_pool_size=1G' "$MDBE_CNF" 2>/dev/null \
+    && [ ! -f "$MDBE_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" ] \
+    && echo "$mdbe_detect" | grep -q "DETECT:yes"; then
+    log_pass "mariadb: RHEL layout (my.cnf.d only) -> writes there, marker + pool, detect finds it"
+else
+    log_fail "mariadb: RHEL-layout (my.cnf.d) resolution wrong (detect=$mdbe_detect)"
+fi
+
+# 9c. (M1) Active-dir preference: BOTH mariadb.conf.d (empty) AND my.cnf.d (holds an
+# existing 50-server.cnf) exist -> write into the ACTIVE dir (my.cnf.d, the one with a
+# .cnf the daemon reads), NOT the empty mariadb.conf.d.
+MDBA_FIX="${TEST_TMP}/mdba-fix"; MDBA_DATA="${TEST_TMP}/mdba-data"
+mkdir -p "$MDBA_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MDBA_FIX"; mkdir -p "$MDBA_FIX/etc/php.d"
+mkdir -p "$MDBA_FIX/etc/mysql/mariadb.conf.d"   # exists but EMPTY (no *.cnf)
+mkdir -p "$MDBA_FIX/etc/my.cnf.d"
+printf 'max_connections=100\n' > "$MDBA_FIX/etc/my.cnf.d/50-server.cnf"   # active dir marker
+LSO_DATA_DIR="$MDBA_DATA" LSO_FS_ROOT="$MDBA_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MDBA_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --mariadb --force >/dev/null 2>&1 || true
+if [ -f "$MDBA_FIX/etc/my.cnf.d/99-woocommerce.cnf" ] \
+    && grep -q "Managed by litespeed-optimizer" "$MDBA_FIX/etc/my.cnf.d/99-woocommerce.cnf" 2>/dev/null \
+    && [ ! -f "$MDBA_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" ]; then
+    log_pass "mariadb: active-dir preference -> writes into my.cnf.d (has .cnf), not the empty mariadb.conf.d"
+else
+    log_fail "mariadb: active-dir preference wrong (wrote to empty mariadb.conf.d or missed my.cnf.d)"
+fi
+
+# 10. Unit-level backup-rollback: a marked 99-woocommerce.cnf created fresh (after the
+# backup) must be removed on rollback, while an unrelated sibling 50-server.cnf that
+# pre-existed the backup is restored untouched. Driven at the unit level (source
+# backup.sh directly), mirroring the os-limits/logrotate rollback tests.
+MDBR_FIX="${TEST_TMP}/mdbr-fix"; MDBR_DATA="${TEST_TMP}/mdbr-data"
+mkdir -p "$MDBR_DATA"; cp -R "${CONFIGS_DIR}/plain-ols/." "$MDBR_FIX/"
+(
+    set -euo pipefail
+    DATA_DIR="$MDBR_DATA"; BACKUP_DIR="${DATA_DIR}/backups"; LOG_DIR="${DATA_DIR}/logs"
+    LOG_FILE="${LOG_DIR}/t.log"; VERSION="0.1.0-test"; QUIET=true DRY_RUN=false FORCE=true
+    : "$VERSION" "$QUIET" "$DRY_RUN" "$FORCE"   # consumed by sourced backup.sh (silence SC2034)
+    mkdir -p "$BACKUP_DIR" "$LOG_DIR"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    export LSO_FS_ROOT="$MDBR_FIX" LSO_SKIP_RESTART=1
+    # shellcheck source=/dev/null
+    for m in helpers sysinfo detect-env confedit; do source "${ROOT_DIR}/lib/core/${m}.sh"; done
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    detect_environment
+    # Unrelated sibling present BEFORE the backup, so create_backup captures it.
+    mkdir -p "$MDBR_FIX/etc/mysql/mariadb.conf.d"
+    printf 'max_connections=100\n' > "$MDBR_FIX/etc/mysql/mariadb.conf.d/50-server.cnf"
+    create_backup "" >/dev/null 2>&1            # backup: conf.d w/ 50-server.cnf, no 99-woocommerce.cnf
+    # Simulate a mariadb apply: write our marked drop-in AFTER the backup.
+    printf '# Managed by litespeed-optimizer\n[mysqld]\ninnodb_buffer_pool_size=1G\n' \
+        > "$MDBR_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf"
+    bts=$(ls -1 "$BACKUP_DIR" | head -1)
+    restore_backup_files "${BACKUP_DIR}/${bts}" >/dev/null 2>&1
+)
+if [ ! -f "$MDBR_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" ] \
+    && [ -f "$MDBR_FIX/etc/mysql/mariadb.conf.d/50-server.cnf" ]; then
+    log_pass "mariadb: rollback removes the added 99-woocommerce.cnf, keeps the unrelated sibling"
+else
+    log_fail "mariadb: rollback drop-in/sibling handling wrong"
+fi
+
+# 11. (M6) Rollback must NOT remove an operator's UNMARKED 99-woocommerce.cnf that
+# pre-existed the backup — the marker guard skips it and the rsync restore preserves it.
+MDBU_FIX="${TEST_TMP}/mdbu-fix"; MDBU_DATA="${TEST_TMP}/mdbu-data"
+mkdir -p "$MDBU_DATA"; cp -R "${CONFIGS_DIR}/plain-ols/." "$MDBU_FIX/"
+(
+    set -euo pipefail
+    DATA_DIR="$MDBU_DATA"; BACKUP_DIR="${DATA_DIR}/backups"; LOG_DIR="${DATA_DIR}/logs"
+    LOG_FILE="${LOG_DIR}/t.log"; VERSION="0.1.0-test"; QUIET=true DRY_RUN=false FORCE=true
+    : "$VERSION" "$QUIET" "$DRY_RUN" "$FORCE"   # consumed by sourced backup.sh (silence SC2034)
+    mkdir -p "$BACKUP_DIR" "$LOG_DIR"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    export LSO_FS_ROOT="$MDBU_FIX" LSO_SKIP_RESTART=1
+    # shellcheck source=/dev/null
+    for m in helpers sysinfo detect-env confedit; do source "${ROOT_DIR}/lib/core/${m}.sh"; done
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    detect_environment
+    # Operator's UNMARKED drop-in present BEFORE the backup, so create_backup captures it.
+    mkdir -p "$MDBU_FIX/etc/mysql/mariadb.conf.d"
+    printf 'innodb_buffer_pool_size=7M\n' > "$MDBU_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf"
+    create_backup "" >/dev/null 2>&1
+    bts=$(ls -1 "$BACKUP_DIR" | head -1)
+    restore_backup_files "${BACKUP_DIR}/${bts}" >/dev/null 2>&1
+)
+if [ -f "$MDBU_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" ] \
+    && grep -q "innodb_buffer_pool_size=7M" "$MDBU_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" 2>/dev/null \
+    && ! grep -q "Managed by litespeed-optimizer" "$MDBU_FIX/etc/mysql/mariadb.conf.d/99-woocommerce.cnf" 2>/dev/null; then
+    log_pass "mariadb: rollback preserves an operator's UNMARKED pre-existing 99-woocommerce.cnf"
+else
+    log_fail "mariadb: rollback wrongly removed/altered an unmarked operator drop-in"
+fi
+
+################################################################################
 # SECTION 16: Analyze (scored audit)
 ################################################################################
 log_section "Analyze Tests"
