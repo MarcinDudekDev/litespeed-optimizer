@@ -176,6 +176,15 @@ are guarded live-only. Enterprise + panel-restricted → manual-only. Enforce fl
   limits, explicit payment + crawler whitelist, keep off until tuned.
 
 ## Item 4 — ModSecurity enforce flip (separate, gated)
+**STATUS: IN PROGRESS (this PR) — offline build.** `--modsec-enforce` added to `lib/features/modsec.sh`:
+implies `--modsec`, and `_ms_enforce_flip` rewrites ONLY the `SecRuleEngine` line in the owned
+includes file (DetectionOnly → On) — the module block is untouched. Refuses unless ModSecurity is
+already deployed by this tool AND currently DetectionOnly; idempotent when already On; prints the
+mandatory pre-enforce checklist (soak / audit-review / exclusions / Woo smoke gate / window). Re-running
+`--modsec` reverts to DetectionOnly (safe default). `feature_detect` now recognizes both engine modes.
+Rides the existing verified restart-or-rollback chain. Soak-time / live audit-log FP review stay
+operator responsibilities (can't be verified offline). Suite 379 green (bash 3.2 + 5), shellcheck clean.
+
 - `--modsec-enforce` is a DISTINCT flag; refuses unless the current engine is DetectionOnly. Gate on: a
   minimum DetectionOnly soak period, audit log reviewed, exclusions applied + re-tested, smoke gate
   re-passed, and the operator acknowledges a printed FP summary (`ENFORCE`/`--force`). Verified rollback on

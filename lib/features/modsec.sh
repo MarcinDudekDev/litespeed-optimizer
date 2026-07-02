@@ -168,11 +168,97 @@ _ms_preflight() {
     fi
 }
 
+# Item 4: flip the DEPLOYED DetectionOnly config to enforcing (SecRuleEngine On).
+# A distinct, deliberate step (--modsec-enforce). Refuses unless ModSecurity is
+# already deployed by this tool in DetectionOnly. Rewrites ONLY the engine line in
+# the owned includes file; the module block is untouched. Rides the existing
+# verified restart-or-rollback chain, so a 403'd checkout / 5xx rolls back.
+_ms_enforce_flip() {
+    local conf inc real_inc v="" rf="" n_engine
+    conf="${LSO_MAIN_CONF:-}"
+    inc="$(_ms_conf_dir)/modsec_includes.conf"
+    real_inc="$(_ms_real_lsws)/conf/modsec/modsec_includes.conf"
+
+    # Prove this is a THIS-TOOL DetectionOnly deploy before flipping: module on, the
+    # rules_file points at OUR includes, and the includes carries our managed marker.
+    # (Never flip a hand-built / third-party / migrated ModSecurity config.)
+    [ -n "$conf" ] && [ -f "$conf" ] && v=$(ols_get "$conf" "module mod_security" modsecurity 2>/dev/null)
+    [ -n "$conf" ] && [ -f "$conf" ] && rf=$(ols_get "$conf" "module mod_security" modsecurity_rules_file 2>/dev/null)
+    if [ "$v" != "on" ] || [ "$rf" != "$real_inc" ] || [ ! -f "$inc" ] \
+        || ! grep -q "Managed by litespeed-optimizer" "$inc" 2>/dev/null; then
+        log_error "modsec-enforce: no tool-managed DetectionOnly deploy found (need modsecurity on +"
+        log_error "  modsecurity_rules_file -> our includes + the managed marker). Run --modsec first, review the"
+        log_error "  audit log, apply any Woo/WP exclusions, then re-run --modsec-enforce."
+        return 1
+    fi
+
+    # The engine mode must live ONLY in our includes file — refuse a mixed config with
+    # an inline SecRuleEngine in the httpd_config module block.
+    if _ms_block_enforces "$conf"; then
+        log_error "modsec-enforce: the module block has an inline SecRuleEngine On — refusing (engine must live only"
+        log_error "  in the includes file). Resolve the inline directive, re-run --modsec, then --modsec-enforce."
+        return 1
+    fi
+
+    # Exactly ONE engine line, EOL-anchored (same shape the rewrite matches). Already On
+    # -> idempotent no-op; a single clean DetectionOnly -> flip; anything else -> refuse
+    # (a hand-edited / duplicated / commented-tail engine line could leave a mixed file).
+    n_engine=$(grep -cE '^[[:space:]]*SecRuleEngine[[:space:]]+' "$inc" 2>/dev/null || true)
+    if [ "$n_engine" != "1" ]; then
+        log_error "modsec-enforce: expected exactly one SecRuleEngine line in the includes file (found ${n_engine}) — refusing."
+        return 1
+    fi
+    if grep -qE '^SecRuleEngine[[:space:]]+On[[:space:]]*$' "$inc" 2>/dev/null; then
+        log_info "modsec-enforce: already enforcing (SecRuleEngine On) — nothing to do."
+        return 0
+    fi
+    if ! grep -qE '^SecRuleEngine[[:space:]]+DetectionOnly[[:space:]]*$' "$inc" 2>/dev/null; then
+        log_error "modsec-enforce: the SecRuleEngine line is not a clean DetectionOnly — refusing (re-run --modsec)."
+        return 1
+    fi
+
+    log_warn "modsec-enforce: flipping SecRuleEngine DetectionOnly -> On. Confirm FIRST:"
+    log_warn "  - a DetectionOnly soak long enough to see real traffic;"
+    log_warn "  - the audit log reviewed and Woo/WP false positives excluded + re-tested;"
+    log_warn "  - the WooCommerce smoke gate passes (cart / checkout / Store API);"
+    log_warn "  - a maintenance window + someone watching orders. Enforcing too early can 403 checkout."
+
+    if [ "${DRY_RUN:-false}" = true ]; then
+        log_info "[DRY RUN] Would flip SecRuleEngine to On in ${inc#${LSO_FS_ROOT:-}}"
+        return 0
+    fi
+
+    # Write to a temp and VERIFY IT before swapping in — a bad rewrite never reaches disk.
+    local dir tmp
+    dir="$(dirname "$inc")"
+    tmp=$(secure_mktemp "${dir}/.lso-modsec.XXXXXX") || return 1
+    awk '{ if ($0 ~ /^SecRuleEngine[[:space:]]+DetectionOnly[[:space:]]*$/) print "SecRuleEngine On"; else print }' \
+        "$inc" > "$tmp"
+    if ! grep -qE '^SecRuleEngine On$' "$tmp" 2>/dev/null \
+        || grep -qE '^[[:space:]]*SecRuleEngine[[:space:]]+DetectionOnly' "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        log_error "modsec-enforce: rewrite verification failed (staged temp) — no change made."
+        return 1
+    fi
+    copy_file_permissions "$inc" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$inc"
+    log_success "modsec-enforce: SecRuleEngine is now On (enforcing). Watch orders + 5xx; rollback restores DetectionOnly."
+}
+
 feature_apply_custom_modsec() {
     # Opt-in gate: never deploy ModSecurity config unless explicitly asked.
     if [ "${LSO_MODSEC:-}" != "1" ]; then
         log_info "modsec: not enabled — pass --modsec to deploy ModSecurity v3 in DetectionOnly (never enforces)"
         return 0
+    fi
+
+    # Item 4: the enforce flip is a DISTINCT, gated action. It runs BEFORE the
+    # Enterprise / panel-restricted early returns so a requested enforce is never
+    # silently reported as success — on those hosts the ownership check fails and
+    # _ms_enforce_flip returns 1 with a clear error.
+    if [ "${LSO_MODSEC_ENFORCE:-}" = "1" ]; then
+        _ms_enforce_flip
+        return $?
     fi
 
     if [ "${LSO_EDITION:-}" = "enterprise" ]; then
@@ -262,10 +348,13 @@ feature_detect_custom_modsec() {
     local v
     v=$(ols_get "$config_file" "module mod_security" modsecurity 2>/dev/null) || return 1
     [ "$v" = "on" ] || return 1
-    # Must be present AND DetectionOnly (never report On/enforce as "this feature").
+    # Our OWNED includes managing the engine — DetectionOnly OR On (post-enforce).
+    # Require the managed marker so a third-party ModSecurity at the same path isn't
+    # mis-reported as this feature.
     local inc
     inc="$(_ms_conf_dir)/modsec_includes.conf"
-    [ -f "$inc" ] && grep -qE '^[[:space:]]*SecRuleEngine[[:space:]]+DetectionOnly' "$inc" 2>/dev/null
+    [ -f "$inc" ] && grep -q "Managed by litespeed-optimizer" "$inc" 2>/dev/null \
+        && grep -qE '^[[:space:]]*SecRuleEngine[[:space:]]+(DetectionOnly|On)' "$inc" 2>/dev/null
 }
 
 FEATURE_ID="modsec"
