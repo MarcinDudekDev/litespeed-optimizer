@@ -73,6 +73,11 @@ LSO_FAIL2BAN="${LSO_FAIL2BAN:-}"
 # shellcheck disable=SC2034  # consumed by lib/features/fail2ban.sh
 LSO_FAIL2BAN_ENABLE="${LSO_FAIL2BAN_ENABLE:-}"
 
+# ModSecurity opt-in gate (set by --modsec, or via env). Read as ${LSO_MODSEC:-}
+# by lib/features/modsec.sh. Ships DetectionOnly only; never enforces.
+# shellcheck disable=SC2034  # consumed by lib/features/modsec.sh
+LSO_MODSEC="${LSO_MODSEC:-}"
+
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the REGISTERED features (lib/features/*.sh); keep this list in
 # sync with feature_register calls. Roadmap-only features (http3, redis-tuning,
@@ -87,6 +92,7 @@ ALLOWED_FEATURES=(
     "woocommerce" "woo"
     "security" "headers" "throttling"
     "fail2ban" "f2b"
+    "modsec" "modsecurity" "waf"
 )
 
 ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
@@ -361,6 +367,8 @@ OPTIONS:
                                 (wp-login/xmlrpc/4xx), opt-in (default: off)
     --fail2ban-enable           arm the jails; aborts unless the access log
                                 shows the real client IP (not a CDN edge)
+    --modsec                    deploy ModSecurity v3 + OWASP CRS in
+                                DetectionOnly (never enforces), opt-in
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -375,6 +383,8 @@ FEATURES (use with --feature / --exclude):
     security                    Throttling, headers, xmlrpc, CVE checks
     fail2ban                    fail2ban brute-force/scanner jails, staged
                                 (opt-in via --fail2ban; NOT in default profiles)
+    modsec                      ModSecurity v3 + OWASP CRS in DetectionOnly
+                                (opt-in via --modsec; NOT in default profiles)
 
     Planned (not yet implemented; see ROADMAP.md): http3 · redis tuning ·
     mariadb buffer pool · os-limits (systemd/sysctl)
@@ -861,6 +871,13 @@ parse_arguments() {
                 export LSO_FAIL2BAN=1
                 export LSO_FAIL2BAN_ENABLE=1
                 [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="fail2ban"
+                shift
+                ;;
+            --modsec)
+                # Opt-in: deploy ModSecurity v3 in DetectionOnly (never enforces).
+                # Also select the feature (not in any default profile) unless named.
+                export LSO_MODSEC=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="modsec"
                 shift
                 ;;
             --trusted-ip)

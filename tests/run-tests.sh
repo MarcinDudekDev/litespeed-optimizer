@@ -4,7 +4,12 @@
 # compatibility, portability, functional tests on fixture trees, confedit
 # unit tests, backup/rollback round-trip.
 
-set -euo pipefail
+# NOTE: intentionally NOT `pipefail` at top level. Assertions use `echo "$out" | grep -q PAT`;
+# grep -q exits on first match and closes the pipe, so echo can take SIGPIPE (EPIPE) — under
+# pipefail that turns a SUCCESSFUL match into a pipeline failure, nondeterministically (it races
+# on macOS where pipe/echo buffering differs from Linux). Dropping pipefail here makes the
+# pipeline status = grep's status (correct). Subshells that genuinely need pipefail re-set it.
+set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -26,6 +31,24 @@ log_pass() { echo -e "${GREEN}[PASS]${NC} $*"; PASS=$((PASS + 1)); }
 log_fail() { echo -e "${RED}[FAIL]${NC} $*"; FAIL=$((FAIL + 1)); }
 log_skip() { echo -e "${YELLOW}[SKIP]${NC} $*"; SKIP=$((SKIP + 1)); }
 log_section() { echo -e "\n${BLUE}=== $* ===${NC}"; }
+
+# Wait until a local TCP port accepts a connection (mock-server readiness). A fixed
+# `sleep 1` races on slow/loaded CI runners (esp. macOS): the python server isn't
+# bound yet when curl fires -> HTTP 000. Poll up to ~10s via bash /dev/tcp (bash 3.2
+# built-in); fall back to a longer sleep if /dev/tcp is unavailable.
+_wait_port() {
+    local port="$1" i=0
+    while [ "$i" -lt 50 ]; do
+        if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+            exec 3>&- 3<&- 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.2
+        i=$((i + 1))
+    done
+    sleep 2
+    return 0
+}
 
 # Isolated data dir so tests never touch ~/.litespeed-optimizer
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/lso-tests.XXXXXX")
@@ -600,6 +623,13 @@ mkdir -p "$BK_FIXTURE/etc/fail2ban/jail.d" "$BK_FIXTURE/etc/fail2ban/filter.d"
 printf '[wordpress]\nenabled = true\nmaxretry = 5\n' > "$BK_FIXTURE/etc/fail2ban/jail.local"
 printf '[Definition]\nfailregex = ^<HOST> .*wp-login\n' > "$BK_FIXTURE/etc/fail2ban/filter.d/lso-wp.conf"
 
+# ModSecurity logrotate drop-in is a SINGLE file in the shared /etc/logrotate.d.
+# Seed our file + an UNRELATED one; the backup must capture ours without touching
+# theirs on restore (unlike the --delete'd dedicated dirs).
+mkdir -p "$BK_FIXTURE/etc/logrotate.d"
+printf '/usr/local/lsws/logs/modsec_audit.log {\n  weekly\n}\n' > "$BK_FIXTURE/etc/logrotate.d/lso-modsec"
+printf '/var/log/other-app.log {\n  daily\n}\n' > "$BK_FIXTURE/etc/logrotate.d/keep-me"
+
 # Snapshot of pristine state for the final diff
 PRISTINE="${TEST_TMP}/pristine"
 mkdir -p "$PRISTINE"
@@ -674,6 +704,10 @@ echo "CORRUPTED" > "$BK_FIXTURE/home/example.com/public_html/.htaccess"
 rm -f "$BK_FIXTURE/usr/local/lsws/conf/vhosts/example/vhconf.conf"
 echo "maxretry = 999  # tampered" >> "$BK_FIXTURE/etc/fail2ban/jail.local"
 rm -f "$BK_FIXTURE/etc/fail2ban/filter.d/lso-wp.conf"
+echo "# tampered" >> "$BK_FIXTURE/etc/logrotate.d/lso-modsec"
+# An unrelated logrotate config added AFTER the backup — rollback must NOT wipe it
+# (proves the single-file handling, not a --delete of the shared dir).
+printf '/var/log/added-later.log {\n  daily\n}\n' > "$BK_FIXTURE/etc/logrotate.d/added-later"
 
 # 3. Restore
 if run_backup_env restore_backup_files "${LSO_DATA_DIR}/backups/${backup_ts}" >/dev/null 2>&1; then
@@ -699,6 +733,44 @@ if diff -r "$PRISTINE/etc/fail2ban" "$BK_FIXTURE/etc/fail2ban" >/dev/null 2>&1; 
 else
     log_fail "fail2ban tree differs after rollback"
     diff -r "$PRISTINE/etc/fail2ban" "$BK_FIXTURE/etc/fail2ban" 2>&1 | head -5
+fi
+# ModSecurity logrotate: our single file reverted to pristine; unrelated configs
+# (pre-existing AND added-after-backup) left untouched — no --delete of the shared dir.
+if diff "$PRISTINE/etc/logrotate.d/lso-modsec" "$BK_FIXTURE/etc/logrotate.d/lso-modsec" >/dev/null 2>&1 \
+    && [ -f "$BK_FIXTURE/etc/logrotate.d/keep-me" ] \
+    && [ -f "$BK_FIXTURE/etc/logrotate.d/added-later" ]; then
+    log_pass "logrotate: lso-modsec reverted; unrelated /etc/logrotate.d configs untouched (no --delete)"
+else
+    log_fail "logrotate: single-file restore wrong or wiped an unrelated config"
+fi
+
+# Restore branch: a lso-modsec that did NOT exist at backup time (added during the
+# rolled-back run) must be REMOVED on restore.
+LR_FIX="${TEST_TMP}/lr-added-fix"; LR_DATA="${TEST_TMP}/lr-added-data"
+mkdir -p "$LR_DATA"; cp -R "${CONFIGS_DIR}/plain-ols/." "$LR_FIX/"
+(
+    set -euo pipefail
+    DATA_DIR="$LR_DATA"; BACKUP_DIR="${DATA_DIR}/backups"; LOG_DIR="${DATA_DIR}/logs"
+    LOG_FILE="${LOG_DIR}/t.log"; VERSION="0.1.0-test"; QUIET=true DRY_RUN=false FORCE=true
+    mkdir -p "$BACKUP_DIR" "$LOG_DIR"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    export LSO_FS_ROOT="$LR_FIX" LSO_SKIP_RESTART=1
+    # shellcheck source=/dev/null
+    for m in helpers sysinfo detect-env confedit; do source "${ROOT_DIR}/lib/core/${m}.sh"; done
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    detect_environment
+    create_backup "" >/dev/null 2>&1            # backup has NO lso-modsec
+    mkdir -p "$LR_FIX/etc/logrotate.d"
+    # Marker'd like a file this tool wrote (restore only removes marker-matched files).
+    printf '# Managed by litespeed-optimizer\n/x.log {\n  weekly\n}\n' > "$LR_FIX/etc/logrotate.d/lso-modsec"
+    bts=$(ls -1 "$BACKUP_DIR" | head -1)
+    restore_backup_files "${BACKUP_DIR}/${bts}" >/dev/null 2>&1
+)
+if [ ! -f "$LR_FIX/etc/logrotate.d/lso-modsec" ]; then
+    log_pass "logrotate: lso-modsec added during a run is removed on rollback (backup predates it)"
+else
+    log_fail "logrotate: stray lso-modsec not removed on rollback"
 fi
 
 # 4. Checksum verification reports clean
@@ -2099,6 +2171,130 @@ else
 fi
 
 ################################################################################
+# SECTION 15d: ModSecurity Feature (LIVE-phase Item 2 — offline/fixture only)
+################################################################################
+log_section "ModSecurity Feature Tests"
+
+MS_FIX="${TEST_TMP}/ms-fix"
+MS_DATA="${TEST_TMP}/ms-data"
+mkdir -p "$MS_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$MS_FIX"
+mkdir -p "$MS_FIX/etc/php.d"
+
+MS_CONF="$MS_FIX/usr/local/lsws/conf/httpd_config.conf"
+MS_INC="$MS_FIX/usr/local/lsws/conf/modsec/modsec_includes.conf"
+MS_BEFORE="$MS_FIX/usr/local/lsws/conf/modsec/wp_exclusions_before.conf"
+MS_AFTER="$MS_FIX/usr/local/lsws/conf/modsec/wp_exclusions_after.conf"
+MS_LOGROTATE="$MS_FIX/etc/logrotate.d/lso-modsec"
+ms_env() {
+    LSO_DATA_DIR="$MS_DATA" LSO_FS_ROOT="$MS_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$MS_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+
+# Opt-in gate: selecting the feature WITHOUT --modsec must deploy nothing.
+ms_gate_out=$(ms_env optimize --feature modsec --force)
+if [ ! -f "$MS_INC" ] && echo "$ms_gate_out" | grep -qi "pass --modsec to deploy"; then
+    log_pass "modsec: opt-in gate — nothing deployed without --modsec (guidance printed)"
+else
+    log_fail "modsec: deployed or gate message missing without --modsec"
+fi
+
+# --modsec (no CRS present yet): DetectionOnly module + owned files + logrotate.
+ms_out=$(ms_env optimize --modsec --force)
+ms_ok=true
+ms_block=$(awk '/^module mod_security \{/,/^\}/' "$MS_CONF")
+echo "$ms_block" | grep -qE "ls_enabled[[:space:]]+1" || { log_fail "modsec: 'ls_enabled 1' missing from module block"; ms_ok=false; }
+echo "$ms_block" | grep -qE "modsecurity[[:space:]]+on" || { log_fail "modsec: 'modsecurity on' missing from module block"; ms_ok=false; }
+echo "$ms_block" | grep -qE "modsecurity_rules_file[[:space:]]+/usr/local/lsws/conf/modsec/modsec_includes\.conf" \
+    || { log_fail "modsec: modsecurity_rules_file wrong/real-path leaked"; ms_ok=false; }
+grep -qE '^SecRuleEngine[[:space:]]+DetectionOnly' "$MS_INC" 2>/dev/null || { log_fail "modsec: includes missing DetectionOnly"; ms_ok=false; }
+grep -qE '^SecAuditEngine[[:space:]]+RelevantOnly' "$MS_INC" 2>/dev/null || { log_fail "modsec: includes missing SecAuditEngine RelevantOnly"; ms_ok=false; }
+grep -q 'crs_exclusions_wordpress=1' "$MS_BEFORE" 2>/dev/null || { log_fail "modsec: WP exclusion plugin not enabled in before-file"; ms_ok=false; }
+grep -q 'ruleRemoveByTag=attack-sqli' "$MS_AFTER" 2>/dev/null || { log_fail "modsec: pre-seeded Woo/WP exclusions missing in after-file"; ms_ok=false; }
+[ -f "$MS_LOGROTATE" ] && grep -q 'modsec_audit.log' "$MS_LOGROTATE" || { log_fail "modsec: logrotate drop-in missing"; ms_ok=false; }
+# CRS not installed -> the CRS Include lines must be COMMENTED (no dangling Include).
+if grep -qE '^Include .*owasp/crs-setup\.conf' "$MS_INC" 2>/dev/null; then
+    log_fail "modsec: CRS Include active though no CRS is installed (would break reload)"
+    ms_ok=false
+fi
+[ "$ms_ok" = true ] && log_pass "modsec: --modsec stages DetectionOnly module + owned includes/exclusions + logrotate (CRS absent → commented)"
+
+# DANGER guard: SecRuleEngine On must never be written by this feature.
+if grep -rqiE '^[[:space:]]*SecRuleEngine[[:space:]]+On' "$MS_FIX/usr/local/lsws/conf/modsec/" 2>/dev/null; then
+    log_fail "modsec: SAFETY VIOLATION — SecRuleEngine On written (must be DetectionOnly only)"
+else
+    log_pass "modsec: never enforces — no 'SecRuleEngine On' anywhere (DetectionOnly by construction)"
+fi
+
+# Idempotent: re-apply keeps a single module block and one SecRuleEngine line.
+ms_env optimize --modsec --force >/dev/null
+if [ "$(grep -c '^module mod_security {' "$MS_CONF")" = "1" ] \
+    && [ "$(grep -cE '^SecRuleEngine' "$MS_INC")" = "1" ]; then
+    log_pass "modsec: idempotent (single module block + single SecRuleEngine line on re-apply)"
+else
+    log_fail "modsec: duplicated module block or SecRuleEngine line on re-apply"
+fi
+
+# Partial CRS: crs-setup.conf present but rules/ EMPTY -> Includes stay commented
+# (an empty rules glob would be a load error and break the restart).
+mkdir -p "$MS_FIX/usr/local/lsws/conf/owasp/rules"
+echo "# crs-setup" > "$MS_FIX/usr/local/lsws/conf/owasp/crs-setup.conf"
+ms_env optimize --modsec --force >/dev/null
+if grep -qE '^Include /usr/local/lsws/conf/owasp/crs-setup\.conf' "$MS_INC" 2>/dev/null; then
+    log_fail "modsec: CRS Include active with an EMPTY rules/ dir (would break reload)"
+else
+    log_pass "modsec: partial CRS (crs-setup only, empty rules/) keeps Includes commented"
+fi
+
+# Usable CRS: crs-setup.conf AND a rules/*.conf -> the CRS Include lines activate.
+echo "# REQUEST rule" > "$MS_FIX/usr/local/lsws/conf/owasp/rules/REQUEST-901-INITIALIZATION.conf"
+ms_env optimize --modsec --force >/dev/null
+if grep -qE '^Include /usr/local/lsws/conf/owasp/crs-setup\.conf' "$MS_INC" 2>/dev/null \
+    && grep -qE '^Include /usr/local/lsws/conf/owasp/rules/\*\.conf' "$MS_INC" 2>/dev/null; then
+    log_pass "modsec: CRS Include lines activate when a usable ruleset (setup + rules) is present"
+else
+    log_fail "modsec: CRS Includes not wired despite a usable ruleset"
+fi
+
+# SAFETY: a pre-existing module block that ENFORCES (SecRuleEngine On) is refused —
+# we must never leave an enforce in place. Fresh fixture with an enforcing block.
+MSE_FIX="${TEST_TMP}/ms-enforce-fix"; MSE_DATA="${TEST_TMP}/ms-enforce-data"
+mkdir -p "$MSE_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$MSE_FIX"; mkdir -p "$MSE_FIX/etc/php.d"
+printf '\nmodule mod_security {\n  ls_enabled 1\n  modsecurity on\n  modsecurity_rules `\n    SecRuleEngine On\n  `\n}\n' \
+    >> "$MSE_FIX/usr/local/lsws/conf/httpd_config.conf"
+mse_out=$(LSO_DATA_DIR="$MSE_DATA" LSO_FS_ROOT="$MSE_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$MSE_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --modsec --force 2>&1 || true)
+if echo "$mse_out" | grep -qi "block enforces" \
+    && [ ! -f "$MSE_FIX/usr/local/lsws/conf/modsec/modsec_includes.conf" ]; then
+    log_pass "modsec: refuses when an existing module block enforces (SecRuleEngine On) — nothing written"
+else
+    log_fail "modsec: did not refuse a pre-existing enforcing module block"
+fi
+
+# feature_detect_custom_modsec: true after apply (module on + DetectionOnly includes).
+ms_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$MS_FIX"; LSO_LSWS_ROOT="$MS_FIX/usr/local/lsws"
+    LSO_MAIN_CONF="$MS_CONF"
+    # Define _lso_fs inline (used by _ms_conf_dir). Do NOT source detect-env.sh — its
+    # top-level `LSO_LSWS_ROOT=""` init would wipe the value set just above.
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/modsec.sh"
+    if feature_detect_custom_modsec "$MS_CONF"; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$ms_detect" | grep -q "DETECT:yes"; then
+    log_pass "modsec: feature_detect recognizes the staged DetectionOnly config"
+else
+    log_fail "modsec: feature_detect failed to recognize staged config: $ms_detect"
+fi
+
+################################################################################
 # SECTION 16: Analyze (scored audit)
 ################################################################################
 log_section "Analyze Tests"
@@ -2272,7 +2468,7 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
     BENCH_PID=$!
-    sleep 1
+    _wait_port "$BENCH_PORT"
 
     bench_out=$(LSO_BENCH_RUNS=4 LSO_BENCH_CART=0 \
         "${OPTIMIZER}" benchmark "http://127.0.0.1:${BENCH_PORT}/" 2>&1 || true)
@@ -2450,7 +2646,7 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
     RM_PID=$!
-    sleep 1
+    _wait_port "$RM_PORT"
 
     rm_out=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${RM_PORT}/" 2>&1 || true)
     kill "$RM_PID" 2>/dev/null || true
@@ -2549,7 +2745,7 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
     RM_PID=$!
-    sleep 1
+    _wait_port "$RM_PORT"
     rm_bad=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${RM_PORT}/" 2>&1 || true)
     kill "$RM_PID" 2>/dev/null || true
 
@@ -2586,7 +2782,7 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
     RM_PID=$!
-    sleep 1
+    _wait_port "$RM_PORT"
     rm_json=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${RM_PORT}/" --json 2>/dev/null || true)
     kill "$RM_PID" 2>/dev/null || true
     if echo "$rm_json" | grep -q '"command": *"analyze-remote"' && echo "$rm_json" | grep -q '"requests_used"'; then
@@ -2899,7 +3095,7 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
     BA_PID=$!
-    sleep 1
+    _wait_port "$BA_PORT"
 
     # Without auth -> 401 -> "not LiteSpeed (or hidden)" + low score
     noauth=$(LSO_REMOTE_DELAY=0 "${OPTIMIZER}" analyze --remote "http://127.0.0.1:${BA_PORT}/" 2>&1 || true)
@@ -3162,7 +3358,7 @@ if command -v php &>/dev/null; then
     PR_PORT=18917
     php -S "127.0.0.1:${PR_PORT}" -t "$PR_DOCROOT" >/dev/null 2>&1 &
     PHP_PID=$!
-    sleep 1
+    _wait_port "$PR_PORT"
 
     pr_out=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$PR_DOCROOT" \
         LSO_PROBE_URL="http://127.0.0.1:${PR_PORT}" \
@@ -3236,7 +3432,7 @@ PYEOF
     # present -> redis_ext:true, exit 0, file cleaned
     python3 "$PR_SRV" 18918 present &
     PRJ_PID=$!
-    sleep 1
+    _wait_port 18918
     prj=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$PRJ_DOCROOT" \
         LSO_PROBE_URL="http://127.0.0.1:18918" \
         "${OPTIMIZER}" probe-redis --json 2>/dev/null; echo "EXIT:$?")
@@ -3258,7 +3454,7 @@ PYEOF
     # missing -> human verdict + nonzero exit (deterministic, no real php needed)
     python3 "$PR_SRV" 18919 missing &
     PRM_PID=$!
-    sleep 1
+    _wait_port 18919
     prm=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$PRJ_DOCROOT" \
         LSO_PROBE_URL="http://127.0.0.1:18919" \
         "${OPTIMIZER}" probe-redis 2>&1; echo "EXIT:$?")
@@ -3301,7 +3497,7 @@ PYEOF
     }
     # run probe-opcache against a canned body; sets OPC_OUT / OPC_EXIT. $1 port $2 body $3 writable
     opc_run() {
-        python3 "$OPC_SRV" "$1" "$2" & local p=$!; sleep 1
+        python3 "$OPC_SRV" "$1" "$2" & local p=$!; _wait_port "$1"
         OPC_OUT=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$OPC_DR" \
             LSO_PROBE_URL="http://127.0.0.1:$1" LSO_OPCACHE_INI_WRITABLE="${3:-1}" \
             "${OPTIMIZER}" probe-opcache 2>&1; echo "EXIT:$?")
@@ -3403,7 +3599,7 @@ PYEOF
     fi
 
     # opcache disabled in the SAPI
-    python3 "$OPC_SRV" 18926 '{"php_version":"8.3.10","sapi":"litespeed","opcache":null}' & OPC_P=$!; sleep 1
+    python3 "$OPC_SRV" 18926 '{"php_version":"8.3.10","sapi":"litespeed","opcache":null}' & OPC_P=$!; _wait_port 18926
     opc_dis=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$OPC_DR" LSO_PROBE_URL="http://127.0.0.1:18926" \
         "${OPTIMIZER}" probe-opcache 2>&1; echo "EXIT:$?")
     kill "$OPC_P" 2>/dev/null || true
@@ -3414,7 +3610,7 @@ PYEOF
     fi
 
     # --json verdict shape
-    python3 "$OPC_SRV" 18927 "$(opc_body $((120*MB)) $((5*MB)) 99.0 1000 800 0 $((40*MB)))" & OPC_JP=$!; sleep 1
+    python3 "$OPC_SRV" 18927 "$(opc_body $((120*MB)) $((5*MB)) 99.0 1000 800 0 $((40*MB)))" & OPC_JP=$!; _wait_port 18927
     opc_json=$(LSO_DATA_DIR="$TEST_TMP" LSO_PROBE_DOCROOT="$OPC_DR" LSO_PROBE_URL="http://127.0.0.1:18927" \
         LSO_OPCACHE_INI_WRITABLE=1 "${OPTIMIZER}" probe-opcache --json 2>/dev/null || true)
     kill "$OPC_JP" 2>/dev/null || true

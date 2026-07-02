@@ -129,6 +129,17 @@ interactions to document and guard:
 - **Top risk:** self-DoS (ban the CDN edge or the admin). Mitigations above + the smoke gate.
 
 ## Item 2 — ModSecurity v3 + OWASP CRS, DetectionOnly only (the big one)
+**STATUS: IN PROGRESS (this PR) — offline build.** `lib/features/modsec.sh` added: opt-in `--modsec`,
+DetectionOnly by construction (SecRuleEngine DetectionOnly lives in an owned includes file referenced
+by `modsecurity_rules_file`; the module block carries only ls_enabled/modsecurity/rules_file). Owned
+files under `conf/modsec/` (backed up with the conf tree): includes + WP-exclusion-plugin enable +
+pre-seeded Woo/WP FP exclusions. CRS Includes wire automatically when a ruleset is present under
+`conf/owasp/` (commented otherwise so reload never breaks). SecAuditEngine RelevantOnly + a logrotate
+drop-in (`/etc/logrotate.d/lso-modsec`, single-file backup/restore — never `--delete`s the shared
+dir). Danger guard refuses `SecRuleEngine On`. Package install / module-.so-load / CRS-parse preflight
+are guarded live-only. Enterprise + panel-restricted → manual-only. Enforce flip stays Item 4. Suite
+372 green (bash 3.2 + 5), shellcheck clean.
+
 - OLS = libModSecurity v3 ONLY (CRS 4.x; 2.9-syntax/Comodo rulesets will not load). Module file is the
   `mod_security.so` under the LSWS modules dir; loaded as a `module mod_security { ls_enabled 1;
   modsecurity on; SecRuleEngine DetectionOnly (backtick-wrapped inline); modsecurity_rules_file -> an

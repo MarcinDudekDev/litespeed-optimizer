@@ -121,6 +121,15 @@ create_backup() {
         rsync -a "$real_src/" "${CURRENT_BACKUP_DIR}/${dst}/" 2>/dev/null || log_warn "Could not backup $real_src"
     done
 
+    # ModSecurity audit-log logrotate drop-in — a SINGLE owned file. /etc/logrotate.d
+    # is shared system-wide, so we never rsync the whole dir with --delete (that would
+    # wipe unrelated logrotate configs on rollback). Back up just our file.
+    if [ -f "$(_bk_fs /etc/logrotate.d/lso-modsec)" ]; then
+        mkdir -p "${CURRENT_BACKUP_DIR}/logrotate"
+        cp -p "$(_bk_fs /etc/logrotate.d/lso-modsec)" "${CURRENT_BACKUP_DIR}/logrotate/lso-modsec" 2>/dev/null \
+            || log_warn "Could not backup /etc/logrotate.d/lso-modsec"
+    fi
+
     if [ "$backup_failed" = true ]; then
         log_error "Backup failed - aborting"
         rm -rf "$CURRENT_BACKUP_DIR"
@@ -298,6 +307,22 @@ restore_backup_files() {
             fail2ban-client unban --all >/dev/null 2>&1 \
                 || log_warn "fail2ban reloaded but 'unban --all' failed — clear stale bans manually if needed"
         fi
+    fi
+
+    # ModSecurity logrotate drop-in (single owned file; never touch other logrotate
+    # configs). Restore the backed-up copy if present; otherwise the backup predates
+    # the file, i.e. this run added it — remove it so rollback truly undoes the run.
+    if [ -f "$backup_path/logrotate/lso-modsec" ]; then
+        log_info "Restoring /etc/logrotate.d/lso-modsec ..."
+        mkdir -p "$(_bk_fs /etc/logrotate.d)"
+        cp -p "$backup_path/logrotate/lso-modsec" "$(_bk_fs /etc/logrotate.d/lso-modsec)" 2>/dev/null \
+            || log_warn "Could not restore /etc/logrotate.d/lso-modsec"
+    elif [ -f "$(_bk_fs /etc/logrotate.d/lso-modsec)" ] \
+        && grep -q "Managed by litespeed-optimizer" "$(_bk_fs /etc/logrotate.d/lso-modsec)" 2>/dev/null; then
+        # Only remove OUR file (marker-guarded): the backup predates it, so this run
+        # added it. Never touch an identically-named file an operator created.
+        log_info "Removing /etc/logrotate.d/lso-modsec (added during the rolled-back run) ..."
+        rm -f "$(_bk_fs /etc/logrotate.d/lso-modsec)"
     fi
 
     # 6. LSCWP plugin options — the inverse of the pre-change `litespeed-option
