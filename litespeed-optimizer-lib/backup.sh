@@ -283,6 +283,37 @@ restore_backup_files() {
     if [ -d "$backup_path/systemd" ] && [ -d "$(_bk_fs /etc/systemd/system/lsws.service.d)" ]; then
         rsync -a --delete "$backup_path/systemd/" "$(_bk_fs /etc/systemd/system/lsws.service.d)/"
     fi
+    # os-limits owned drop-ins (systemd override + sysctl 99-litespeed.conf). The
+    # rsync --delete above already restores the exact pre-run state of a dir that
+    # EXISTED at backup time — but os-limits may CREATE lsws.service.d fresh, in which
+    # case there is no $backup_path/systemd subdir and the added override.conf would
+    # survive a rollback. Mirror the modsec-logrotate rule: if the backup predates our
+    # marker-carrying file, this run added it, so remove it (marker-guarded — never
+    # touch an identically-named file an operator created). If the backup HAS the dir,
+    # the --delete already handled it and these are no-ops.
+    local _ol_f
+    for _ol_f in \
+        "$(_bk_fs /etc/systemd/system/lsws.service.d/override.conf)" \
+        "$(_bk_fs /etc/sysctl.d/99-litespeed.conf)"; do
+        [ -f "$_ol_f" ] || continue
+        grep -q "Managed by litespeed-optimizer" "$_ol_f" 2>/dev/null || continue
+        # Restored from backup? (dir was captured and the file was present pre-run) —
+        # then leave it; --delete/rsync already reconciled it. Only remove when the
+        # backup did NOT carry it, i.e. this run introduced it.
+        case "$_ol_f" in
+            */lsws.service.d/override.conf) [ -f "$backup_path/systemd/override.conf" ] && continue ;;
+            */sysctl.d/99-litespeed.conf)   [ -f "$backup_path/sysctl/99-litespeed.conf" ] && continue ;;
+        esac
+        log_info "Removing ${_ol_f#"${LSO_FS_ROOT:-}"} (os-limits drop-in added during the rolled-back run) ..."
+        rm -f "$_ol_f"
+        # If os-limits CREATED lsws.service.d fresh this run, it is now empty — remove it
+        # too so rollback fully undoes the run. rmdir fails safely (non-zero) on a
+        # non-empty dir, so we never wipe a dir that still holds operator files; suppress
+        # that expected error. Only the systemd drop-in dir — NEVER /etc/sysctl.d (shared).
+        case "$_ol_f" in
+            */lsws.service.d/override.conf) rmdir "$(dirname "$_ol_f")" 2>/dev/null || true ;;
+        esac
+    done
     if [ -d "$backup_path/mariadb" ]; then
         if [ -d "$(_bk_fs /etc/mysql/mariadb.conf.d)" ]; then
             rsync -a --delete "$backup_path/mariadb/" "$(_bk_fs /etc/mysql/mariadb.conf.d)/"

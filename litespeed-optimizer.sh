@@ -89,12 +89,17 @@ LSO_RECAPTCHA="${LSO_RECAPTCHA:-}"
 # DISABLED block to enabled 1 + writes keys. Read as ${LSO_RECAPTCHA_ENABLE:-}.
 # shellcheck disable=SC2034  # consumed by lib/features/recaptcha.sh
 LSO_RECAPTCHA_ENABLE="${LSO_RECAPTCHA_ENABLE:-}"
+# os-limits opt-in gate (set by --os-limits, or via env). Read as ${LSO_OS_LIMITS:-}
+# by lib/features/os-limits.sh. Writes OS drop-ins (systemd LimitNOFILE + sysctl);
+# OS-level only (never httpd_config), default-off.
+# shellcheck disable=SC2034  # consumed by lib/features/os-limits.sh
+LSO_OS_LIMITS="${LSO_OS_LIMITS:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the REGISTERED features (lib/features/*.sh); keep this list in
 # sync with feature_register calls. Roadmap-only features (http3, redis-tuning,
-# mariadb, os-limits) are intentionally NOT here — accepting them would pass
-# validation and then fail at apply with "Feature not available".
+# mariadb) are intentionally NOT here — accepting them would pass validation and
+# then fail at apply with "Feature not available".
 ALLOWED_FEATURES=(
     "server-tuning" "tuning"
     "lsapi-tuning" "lsapi" "php-workers"
@@ -106,6 +111,7 @@ ALLOWED_FEATURES=(
     "fail2ban" "f2b"
     "modsec" "modsecurity" "waf"
     "recaptcha" "captcha"
+    "os-limits" "oslimits"
 )
 
 ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
@@ -394,6 +400,9 @@ OPTIONS:
     --recaptcha-enable          arm a staged lsrecaptcha block (enabled 1 +
                                 keys); needs LSO_RECAPTCHA_SITE_KEY /
                                 LSO_RECAPTCHA_SECRET_KEY; gated, opt-in
+    --os-limits                 write OS connection-limit drop-ins (systemd
+                                LimitNOFILE=65535 + /etc/sysctl.d tuning),
+                                opt-in (default: off)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -412,9 +421,12 @@ FEATURES (use with --feature / --exclude):
                                 (opt-in via --modsec; NOT in default profiles)
     recaptcha                   OLS CAPTCHA protection (lsrecaptcha), staged
                                 disabled (opt-in via --recaptcha; NOT in profiles)
+    os-limits                   OS connection limits — systemd LimitNOFILE=65535
+                                + sysctl tuning (opt-in via --os-limits; NOT in
+                                default profiles)
 
     Planned (not yet implemented; see ROADMAP.md): http3 · redis tuning ·
-    mariadb buffer pool · os-limits (systemd/sysctl)
+    mariadb buffer pool
 
 EXAMPLES:
     # Detect environment (edition, panel, paths)
@@ -938,6 +950,13 @@ parse_arguments() {
                 export LSO_RECAPTCHA=1
                 export LSO_RECAPTCHA_ENABLE=1
                 [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="recaptcha"
+                shift
+                ;;
+            --os-limits|--oslimits)
+                # Opt-in: write OS drop-ins (systemd LimitNOFILE=65535 + sysctl tuning).
+                # OS-level only; also select the feature (not in any default profile).
+                export LSO_OS_LIMITS=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="os-limits"
                 shift
                 ;;
             --trusted-ip)

@@ -2578,6 +2578,210 @@ else
 fi
 
 ################################################################################
+# SECTION 15g: os-limits Feature (systemd LimitNOFILE + sysctl; offline/fixture only)
+################################################################################
+log_section "os-limits Feature Tests"
+
+OL_FIX="${TEST_TMP}/ol-fix"
+OL_DATA="${TEST_TMP}/ol-data"
+mkdir -p "$OL_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$OL_FIX"
+mkdir -p "$OL_FIX/etc/php.d"
+OL_SYSD="$OL_FIX/etc/systemd/system/lsws.service.d/override.conf"
+OL_SYSCTL="$OL_FIX/etc/sysctl.d/99-litespeed.conf"
+ol_env() {
+    LSO_DATA_DIR="$OL_DATA" LSO_FS_ROOT="$OL_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$OL_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+
+# Opt-in gate: selecting the feature WITHOUT --os-limits must write nothing.
+ol_gate_out=$(ol_env optimize --feature os-limits --force)
+if [ ! -f "$OL_SYSD" ] && [ ! -f "$OL_SYSCTL" ] && echo "$ol_gate_out" | grep -qi "pass --os-limits"; then
+    log_pass "os-limits: opt-in gate — nothing written without --os-limits (guidance printed)"
+else
+    log_fail "os-limits: wrote files or gate message missing without --os-limits"
+fi
+
+# --os-limits writes both files with the managed marker + expected keys/values.
+ol_env optimize --os-limits --force >/dev/null
+ol_ok=true
+[ -f "$OL_SYSD" ] || { log_fail "os-limits: systemd override.conf not written"; ol_ok=false; }
+[ -f "$OL_SYSCTL" ] || { log_fail "os-limits: sysctl 99-litespeed.conf not written"; ol_ok=false; }
+grep -q "Managed by litespeed-optimizer" "$OL_SYSD" 2>/dev/null || { log_fail "os-limits: systemd file missing managed marker"; ol_ok=false; }
+grep -q "Managed by litespeed-optimizer" "$OL_SYSCTL" 2>/dev/null || { log_fail "os-limits: sysctl file missing managed marker"; ol_ok=false; }
+grep -qE '^\[Service\]' "$OL_SYSD" 2>/dev/null || { log_fail "os-limits: systemd file missing [Service] section"; ol_ok=false; }
+grep -qE '^LimitNOFILE=65535' "$OL_SYSD" 2>/dev/null || { log_fail "os-limits: LimitNOFILE=65535 missing"; ol_ok=false; }
+grep -qE '^net\.core\.somaxconn=4096' "$OL_SYSCTL" 2>/dev/null || { log_fail "os-limits: somaxconn missing"; ol_ok=false; }
+grep -qE '^net\.ipv4\.tcp_max_syn_backlog=8192' "$OL_SYSCTL" 2>/dev/null || { log_fail "os-limits: tcp_max_syn_backlog missing"; ol_ok=false; }
+grep -qE '^net\.ipv4\.tcp_fin_timeout=15' "$OL_SYSCTL" 2>/dev/null || { log_fail "os-limits: tcp_fin_timeout missing"; ol_ok=false; }
+grep -qE '^net\.ipv4\.tcp_tw_reuse=1' "$OL_SYSCTL" 2>/dev/null || { log_fail "os-limits: tcp_tw_reuse missing"; ol_ok=false; }
+grep -qE '^vm\.swappiness=10' "$OL_SYSCTL" 2>/dev/null || { log_fail "os-limits: swappiness missing"; ol_ok=false; }
+[ "$ol_ok" = true ] && log_pass "os-limits: --os-limits writes both drop-ins with marker, LimitNOFILE=65535, and the sysctl keys/values"
+
+# BBR absent (no seeded tcp_available_congestion_control) -> bbr/fq lines omitted with a note.
+if ! grep -qE '^net\.ipv4\.tcp_congestion_control=bbr' "$OL_SYSCTL" 2>/dev/null \
+    && ! grep -qE '^net\.core\.default_qdisc=fq' "$OL_SYSCTL" 2>/dev/null \
+    && grep -qi 'BBR congestion control (tcp_bbr) is NOT available' "$OL_SYSCTL" 2>/dev/null; then
+    log_pass "os-limits: BBR unavailable -> omits bbr/fq lines and notes why"
+else
+    log_fail "os-limits: mishandled the BBR-absent case"
+fi
+
+# BBR available (seed the congestion-control probe file) -> bbr + fq lines emitted.
+OLB_FIX="${TEST_TMP}/olb-fix"; OLB_DATA="${TEST_TMP}/olb-data"
+mkdir -p "$OLB_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$OLB_FIX"; mkdir -p "$OLB_FIX/etc/php.d"
+mkdir -p "$OLB_FIX/proc/sys/net/ipv4"
+echo "reno cubic bbr" > "$OLB_FIX/proc/sys/net/ipv4/tcp_available_congestion_control"
+LSO_DATA_DIR="$OLB_DATA" LSO_FS_ROOT="$OLB_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OLB_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --os-limits --force >/dev/null 2>&1 || true
+OLB_SYSCTL="$OLB_FIX/etc/sysctl.d/99-litespeed.conf"
+if grep -qE '^net\.core\.default_qdisc=fq' "$OLB_SYSCTL" 2>/dev/null \
+    && grep -qE '^net\.ipv4\.tcp_congestion_control=bbr' "$OLB_SYSCTL" 2>/dev/null; then
+    log_pass "os-limits: BBR available -> emits net.core.default_qdisc=fq + tcp_congestion_control=bbr"
+else
+    log_fail "os-limits: did not emit bbr/fq lines when BBR is available"
+fi
+
+# Idempotent: re-apply keeps single clean files (one LimitNOFILE, one somaxconn).
+ol_env optimize --os-limits --force >/dev/null
+if [ "$(grep -cE '^LimitNOFILE=65535' "$OL_SYSD")" = "1" ] \
+    && [ "$(grep -cE '^net\.core\.somaxconn=4096' "$OL_SYSCTL")" = "1" ]; then
+    log_pass "os-limits: idempotent (single clean files on re-apply)"
+else
+    log_fail "os-limits: duplicated lines on re-apply"
+fi
+
+# feature_detect: yes on written config, no on a bare fixture.
+ol_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$OL_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/os-limits.sh"
+    if feature_detect_custom_os_limits; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+OLN_FIX="${TEST_TMP}/oln-fix"; mkdir -p "$OLN_FIX"
+ol_detect_bare=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$OLN_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/os-limits.sh"
+    if feature_detect_custom_os_limits; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$ol_detect" | grep -q "DETECT:yes" && echo "$ol_detect_bare" | grep -q "DETECT:no"; then
+    log_pass "os-limits: feature_detect yes on written config, no on a bare fixture"
+else
+    log_fail "os-limits: feature_detect wrong (written=$ol_detect bare=$ol_detect_bare)"
+fi
+
+# Panel-restricted host (DirectAdmin) -> manual-only, nothing written.
+OLP_FIX="${TEST_TMP}/olp-fix"; OLP_DATA="${TEST_TMP}/olp-data"
+mkdir -p "$OLP_DATA"; cp -R "${CONFIGS_DIR}/directadmin" "$OLP_FIX"; mkdir -p "$OLP_FIX/etc/php.d"
+olp_out=$(LSO_DATA_DIR="$OLP_DATA" LSO_FS_ROOT="$OLP_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OLP_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --os-limits --force 2>&1 || true)
+if echo "$olp_out" | grep -qi "manual-only" \
+    && [ ! -f "$OLP_FIX/etc/systemd/system/lsws.service.d/override.conf" ] \
+    && [ ! -f "$OLP_FIX/etc/sysctl.d/99-litespeed.conf" ]; then
+    log_pass "os-limits: panel-restricted (DirectAdmin) -> manual-only, nothing written"
+else
+    log_fail "os-limits: did not go manual-only on a panel-restricted host"
+fi
+
+# H1: refuse to overwrite an operator-owned (unmarked) file at a target path — the
+# operator's file must survive UNCHANGED (never clobbered with our 4096 value).
+OLH_FIX="${TEST_TMP}/olh-fix"; OLH_DATA="${TEST_TMP}/olh-data"
+mkdir -p "$OLH_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$OLH_FIX"
+mkdir -p "$OLH_FIX/etc/php.d" "$OLH_FIX/etc/sysctl.d"
+echo "net.core.somaxconn=1" > "$OLH_FIX/etc/sysctl.d/99-litespeed.conf"   # unmarked, operator-owned
+olh_out=$(LSO_DATA_DIR="$OLH_DATA" LSO_FS_ROOT="$OLH_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OLH_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --os-limits --force 2>&1 || true)
+if echo "$olh_out" | grep -qi "refusing to overwrite" \
+    && grep -q "somaxconn=1" "$OLH_FIX/etc/sysctl.d/99-litespeed.conf" \
+    && ! grep -q "somaxconn=4096" "$OLH_FIX/etc/sysctl.d/99-litespeed.conf" \
+    && [ ! -f "$OLH_FIX/etc/systemd/system/lsws.service.d/override.conf" ]; then
+    log_pass "os-limits: refuses to overwrite an unmarked operator file (content preserved, nothing else written)"
+else
+    log_fail "os-limits: clobbered or did not refuse an unmarked operator file"
+fi
+
+# L3: a plain optimize (no --os-limits, no --feature) must never write the os-limits drop-ins.
+OLI_FIX="${TEST_TMP}/oli-fix"; OLI_DATA="${TEST_TMP}/oli-data"
+mkdir -p "$OLI_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$OLI_FIX"; mkdir -p "$OLI_FIX/etc/php.d"
+LSO_DATA_DIR="$OLI_DATA" LSO_FS_ROOT="$OLI_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OLI_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --force >/dev/null 2>&1 || true
+if [ ! -f "$OLI_FIX/etc/systemd/system/lsws.service.d/override.conf" ] \
+    && [ ! -f "$OLI_FIX/etc/sysctl.d/99-litespeed.conf" ]; then
+    log_pass "os-limits: plain optimize (no --os-limits) writes neither drop-in"
+else
+    log_fail "os-limits: plain optimize wrote an os-limits drop-in"
+fi
+
+# N2: dry-run writes nothing but still logs the intended writes. (DRY_RUN is a hardcoded
+# script default, so we drive it via the --dry-run flag, not the env var.)
+OLD_FIX="${TEST_TMP}/old-fix"; OLD_DATA="${TEST_TMP}/old-data"
+mkdir -p "$OLD_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$OLD_FIX"; mkdir -p "$OLD_FIX/etc/php.d"
+old_out=$(LSO_DATA_DIR="$OLD_DATA" LSO_FS_ROOT="$OLD_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OLD_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --os-limits --dry-run --force 2>&1 || true)
+if [ ! -f "$OLD_FIX/etc/systemd/system/lsws.service.d/override.conf" ] \
+    && [ ! -f "$OLD_FIX/etc/sysctl.d/99-litespeed.conf" ] \
+    && echo "$old_out" | grep -q '\[DRY RUN\] Would write'; then
+    log_pass "os-limits: dry-run writes nothing but logs '[DRY RUN] Would write'"
+else
+    log_fail "os-limits: dry-run wrote a file or missing dry-run log"
+fi
+
+# M4 (rollback fresh-dir + sibling survival): os-limits may CREATE lsws.service.d fresh,
+# so a rollback must remove our added override.conf AND the now-empty dir, while an
+# unrelated pre-existing sysctl sibling (captured in the backup) is restored untouched.
+# Driven at the unit level (source backup.sh directly, mirroring the logrotate rollback
+# test above) — deterministic and matches the established backup-harness style.
+OLR_FIX="${TEST_TMP}/olr-fix"; OLR_DATA="${TEST_TMP}/olr-data"
+mkdir -p "$OLR_DATA"; cp -R "${CONFIGS_DIR}/plain-ols/." "$OLR_FIX/"
+(
+    set -euo pipefail
+    DATA_DIR="$OLR_DATA"; BACKUP_DIR="${DATA_DIR}/backups"; LOG_DIR="${DATA_DIR}/logs"
+    LOG_FILE="${LOG_DIR}/t.log"; VERSION="0.1.0-test"; QUIET=true DRY_RUN=false FORCE=true
+    : "$VERSION" "$QUIET" "$DRY_RUN" "$FORCE"   # consumed by sourced backup.sh (silence SC2034)
+    mkdir -p "$BACKUP_DIR" "$LOG_DIR"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    export LSO_FS_ROOT="$OLR_FIX" LSO_SKIP_RESTART=1
+    # shellcheck source=/dev/null
+    for m in helpers sysinfo detect-env confedit; do source "${ROOT_DIR}/lib/core/${m}.sh"; done
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    detect_environment
+    # Unrelated sysctl sibling present BEFORE the backup, so create_backup captures it.
+    mkdir -p "$OLR_FIX/etc/sysctl.d"
+    printf 'net.ipv4.ip_forward=1\n' > "$OLR_FIX/etc/sysctl.d/90-other.conf"
+    create_backup "" >/dev/null 2>&1            # backup: no lsws.service.d, no 99-litespeed.conf
+    # Simulate an os-limits apply: create lsws.service.d fresh + write both marked drop-ins.
+    mkdir -p "$OLR_FIX/etc/systemd/system/lsws.service.d"
+    printf '# Managed by litespeed-optimizer\n[Service]\nLimitNOFILE=65535\n' \
+        > "$OLR_FIX/etc/systemd/system/lsws.service.d/override.conf"
+    printf '# Managed by litespeed-optimizer\nnet.core.somaxconn=4096\n' \
+        > "$OLR_FIX/etc/sysctl.d/99-litespeed.conf"
+    bts=$(ls -1 "$BACKUP_DIR" | head -1)
+    restore_backup_files "${BACKUP_DIR}/${bts}" >/dev/null 2>&1
+)
+if [ ! -f "$OLR_FIX/etc/systemd/system/lsws.service.d/override.conf" ] \
+    && [ ! -d "$OLR_FIX/etc/systemd/system/lsws.service.d" ] \
+    && [ ! -f "$OLR_FIX/etc/sysctl.d/99-litespeed.conf" ] \
+    && [ -f "$OLR_FIX/etc/sysctl.d/90-other.conf" ]; then
+    log_pass "os-limits: rollback removes added override.conf + empty lsws.service.d, drops 99-litespeed.conf, keeps unrelated sibling"
+else
+    log_fail "os-limits: rollback fresh-dir/sibling handling wrong"
+fi
+
+################################################################################
 # SECTION 16: Analyze (scored audit)
 ################################################################################
 log_section "Analyze Tests"
