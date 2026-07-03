@@ -187,6 +187,17 @@ else
     log_fail "rollback accepted malformed timestamp: $rbts_output"
 fi
 
+# rollback with NO timestamp while non-interactive must fail LOUD (not silently
+# no-op on the interactive read). </dev/null makes stdin a non-TTY; LSO_FS_ROOT
+# skips the root gate so we reach the no-timestamp branch. (issue #57)
+mkdir -p "${TEST_TMP}/rb-ni"
+rbni_output=$(LSO_FS_ROOT="${TEST_TMP}/rb-ni" "${OPTIMIZER}" rollback </dev/null 2>&1 || true)
+if echo "$rbni_output" | grep -qiE "not running interactively|no backup timestamp given"; then
+    log_pass "rollback: no timestamp + non-interactive -> clear error (not a silent no-op)"
+else
+    log_fail "rollback: non-interactive no-timestamp did not error clearly: $rbni_output"
+fi
+
 ################################################################################
 # SECTION 5: Detection Tests (fixture trees)
 ################################################################################
