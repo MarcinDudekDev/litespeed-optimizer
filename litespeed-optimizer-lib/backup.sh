@@ -277,6 +277,22 @@ restore_backup_files() {
     if [ -d "$backup_path/redis" ] && [ -d "$(_bk_fs /etc/redis)" ]; then
         rsync -a --delete "$backup_path/redis/" "$(_bk_fs /etc/redis)/"
     fi
+    # redis owned drop-in (litespeed-optimizer.conf). The rsync --delete above already
+    # restores the exact pre-run state of /etc/redis when the dir EXISTED at backup time
+    # (it always does — the redis feature requires redis.conf) — but mirror the
+    # os-limits/mariadb rule anyway: if the backup predates our marker-carrying file,
+    # this run added it, so remove it (marker-guarded — never touch an identically-named
+    # file an operator created). NEVER rmdir /etc/redis (shared with the daemon/socket).
+    local _redis_f
+    _redis_f="$(_bk_fs /etc/redis/litespeed-optimizer.conf)"
+    if [ -f "$_redis_f" ] && grep -q "Managed by litespeed-optimizer" "$_redis_f" 2>/dev/null; then
+        # Captured in the backup? (it pre-existed this run) — then leave it; the rsync
+        # above already reconciled it. Only remove when the backup did NOT carry it.
+        if [ ! -f "$backup_path/redis/litespeed-optimizer.conf" ]; then
+            log_info "Removing ${_redis_f#"${LSO_FS_ROOT:-}"} (redis drop-in added during the rolled-back run) ..."
+            rm -f "$_redis_f"
+        fi
+    fi
     if [ -d "$backup_path/sysctl" ] && [ -d "$(_bk_fs /etc/sysctl.d)" ]; then
         rsync -a --delete "$backup_path/sysctl/" "$(_bk_fs /etc/sysctl.d)/"
     fi

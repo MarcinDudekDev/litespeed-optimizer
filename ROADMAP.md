@@ -49,7 +49,7 @@ RAM-tier values; no live panel box required, fixture-testable like server-tuning
   block (LIVE-verified on OLS 1.9.0 — NOT `enableQuic` on a listener); Enterprise/panel manual-only;
   advises `ufw allow 443/udp`, warns CSF UDPFLOOD must be 0 (never edits csf.conf); guarded
   `curl --http3` verification hint when curl supports it
-- [ ] **`redis`** server-side tuning (maxmemory + eviction policy) — include-based drop-in, issue #48
+- [x] **`redis`** (issue #48) — include-based drop-in: maxmemory (64/128/384/768 MB per RAM tier via lso_redis_mb) + maxmemory-policy allkeys-lru; appends one include to redis.conf; never auto-restarts
 
 **Needs a live box / external account (not verifiable offline — parked on operator resources; tracked as issues #50–54):**
 - DirectAdmin (#50) / RunCloud (#51) server-config write paths (panel regeneration clobbers direct edits — manual-steps only today)
