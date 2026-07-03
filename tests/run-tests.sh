@@ -3197,6 +3197,279 @@ else
 fi
 
 ################################################################################
+# SECTION 15j: redis Feature (object-cache tuning drop-in; offline/fixture only)
+################################################################################
+log_section "redis Feature Tests"
+
+RD_FIX="${TEST_TMP}/rd-fix"
+RD_DATA="${TEST_TMP}/rd-data"
+mkdir -p "$RD_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$RD_FIX"
+mkdir -p "$RD_FIX/etc/php.d"
+mkdir -p "$RD_FIX/etc/redis"
+# Seed a redis.conf so LSO_HAS_REDIS flips true in fixture mode.
+printf 'bind 127.0.0.1\nport 6379\nsupervised systemd\n' > "$RD_FIX/etc/redis/redis.conf"
+RD_DROPIN="$RD_FIX/etc/redis/litespeed-optimizer.conf"
+RD_MAIN="$RD_FIX/etc/redis/redis.conf"
+rd_env() {
+    LSO_DATA_DIR="$RD_DATA" LSO_FS_ROOT="$RD_FIX" LSO_RAM_MB="${RD_RAM:-4096}" LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$RD_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+
+# 1. Opt-in gate: selecting the feature WITHOUT --redis must write nothing.
+rd_gate_out=$(rd_env optimize --feature redis --force)
+if [ ! -f "$RD_DROPIN" ] && echo "$rd_gate_out" | grep -qi "pass --redis"; then
+    log_pass "redis: opt-in gate — nothing written without --redis (guidance printed)"
+else
+    log_fail "redis: wrote a file or gate message missing without --redis"
+fi
+
+# 2. Presence gate: a fixture with NO /etc/redis/redis.conf writes nothing (notes absent).
+RDX_FIX="${TEST_TMP}/rdx-fix"; RDX_DATA="${TEST_TMP}/rdx-data"
+mkdir -p "$RDX_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RDX_FIX"; mkdir -p "$RDX_FIX/etc/php.d"
+rm -rf "$RDX_FIX/etc/redis"   # plain-ols ships /etc/redis/redis.conf — remove it so LSO_HAS_REDIS is false
+rdx_out=$(LSO_DATA_DIR="$RDX_DATA" LSO_FS_ROOT="$RDX_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RDX_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --redis --force 2>&1 || true)
+if echo "$rdx_out" | grep -qi "not present" \
+    && [ ! -f "$RDX_FIX/etc/redis/litespeed-optimizer.conf" ]; then
+    log_pass "redis: presence gate — no redis.conf -> notes it and writes nothing"
+else
+    log_fail "redis: mishandled the not-present case"
+fi
+
+# 3. --redis writes the drop-in with marker + tier-correct maxmemory (4g -> 384mb) + allkeys-lru.
+RD_RAM=4096 rd_env optimize --redis --force >/dev/null
+rd_ok=true
+[ -f "$RD_DROPIN" ] || { log_fail "redis: drop-in not written"; rd_ok=false; }
+grep -q "Managed by litespeed-optimizer" "$RD_DROPIN" 2>/dev/null || { log_fail "redis: drop-in missing managed marker"; rd_ok=false; }
+grep -qE '^maxmemory 384mb' "$RD_DROPIN" 2>/dev/null || { log_fail "redis: 4g maxmemory != 384mb"; rd_ok=false; }
+grep -qE '^maxmemory-policy allkeys-lru' "$RD_DROPIN" 2>/dev/null || { log_fail "redis: allkeys-lru missing"; rd_ok=false; }
+[ "$rd_ok" = true ] && log_pass "redis: --redis writes the drop-in with marker, maxmemory 384mb (4g tier), and allkeys-lru"
+
+# 3b. RAM-tier variants: 1024 -> 64mb, 8192 -> 768mb.
+RD1_FIX="${TEST_TMP}/rd1-fix"; RD1_DATA="${TEST_TMP}/rd1-data"
+mkdir -p "$RD1_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RD1_FIX"; mkdir -p "$RD1_FIX/etc/php.d" "$RD1_FIX/etc/redis"
+printf 'port 6379\n' > "$RD1_FIX/etc/redis/redis.conf"
+LSO_DATA_DIR="$RD1_DATA" LSO_FS_ROOT="$RD1_FIX" LSO_RAM_MB=1024 LSO_CORES=2 \
+    LSO_PHP_INI_SCAN_DIR="$RD1_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --redis --force >/dev/null 2>&1 || true
+RD8_FIX="${TEST_TMP}/rd8-fix"; RD8_DATA="${TEST_TMP}/rd8-data"
+mkdir -p "$RD8_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RD8_FIX"; mkdir -p "$RD8_FIX/etc/php.d" "$RD8_FIX/etc/redis"
+printf 'port 6379\n' > "$RD8_FIX/etc/redis/redis.conf"
+LSO_DATA_DIR="$RD8_DATA" LSO_FS_ROOT="$RD8_FIX" LSO_RAM_MB=8192 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RD8_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --redis --force >/dev/null 2>&1 || true
+if grep -qE '^maxmemory 64mb' "$RD1_FIX/etc/redis/litespeed-optimizer.conf" 2>/dev/null \
+    && grep -qE '^maxmemory 768mb' "$RD8_FIX/etc/redis/litespeed-optimizer.conf" 2>/dev/null; then
+    log_pass "redis: RAM tiers -> 1g maxmemory 64mb, 8g maxmemory 768mb"
+else
+    log_fail "redis: RAM-tier maxmemory values wrong"
+fi
+
+# 4. Include line appended to redis.conf exactly once; re-run stays exactly one (idempotent).
+RD_RAM=4096 rd_env optimize --redis --force >/dev/null   # second apply
+rd_inc_count=$(grep -cFx "include /etc/redis/litespeed-optimizer.conf" "$RD_MAIN" 2>/dev/null || echo 0)
+rd_idem_ok=true
+[ "$rd_inc_count" = "1" ] || { log_fail "redis: include line count != 1 (got $rd_inc_count)"; rd_idem_ok=false; }
+[ "$(grep -cE '^maxmemory ' "$RD_DROPIN")" = "1" ] || { log_fail "redis: duplicated maxmemory on re-apply"; rd_idem_ok=false; }
+grep -q "Managed by litespeed-optimizer" "$RD_DROPIN" 2>/dev/null || { log_fail "redis: marker lost on re-apply"; rd_idem_ok=false; }
+grep -qE '^maxmemory-policy allkeys-lru' "$RD_DROPIN" 2>/dev/null || { log_fail "redis: allkeys-lru lost on re-apply"; rd_idem_ok=false; }
+[ "$rd_idem_ok" = true ] && log_pass "redis: include appended exactly once + idempotent re-apply (single clean drop-in)"
+
+# 5. Ownership-refuse: an UNMARKED pre-existing drop-in must survive UNCHANGED.
+RDH_FIX="${TEST_TMP}/rdh-fix"; RDH_DATA="${TEST_TMP}/rdh-data"
+mkdir -p "$RDH_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RDH_FIX"; mkdir -p "$RDH_FIX/etc/php.d" "$RDH_FIX/etc/redis"
+printf 'port 6379\n' > "$RDH_FIX/etc/redis/redis.conf"
+printf 'maxmemory 7mb\n' > "$RDH_FIX/etc/redis/litespeed-optimizer.conf"   # unmarked, operator-owned
+rdh_out=$(LSO_DATA_DIR="$RDH_DATA" LSO_FS_ROOT="$RDH_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RDH_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --redis --force 2>&1 || true)
+if echo "$rdh_out" | grep -qi "refusing to overwrite" \
+    && grep -q "maxmemory 7mb" "$RDH_FIX/etc/redis/litespeed-optimizer.conf" \
+    && ! grep -q "Managed by litespeed-optimizer" "$RDH_FIX/etc/redis/litespeed-optimizer.conf"; then
+    log_pass "redis: refuses to overwrite an unmarked operator drop-in (content preserved)"
+else
+    log_fail "redis: clobbered or did not refuse an unmarked operator drop-in"
+fi
+
+# 6. feature_detect: yes on written drop-in, no on a bare fixture (redis.conf but no drop-in).
+rd_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$RD_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/redis.sh"
+    if feature_detect_custom_redis; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+RDN_FIX="${TEST_TMP}/rdn-fix"; mkdir -p "$RDN_FIX/etc/redis"
+printf 'port 6379\n' > "$RDN_FIX/etc/redis/redis.conf"
+rd_detect_bare=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$RDN_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/redis.sh"
+    if feature_detect_custom_redis; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$rd_detect" | grep -q "DETECT:yes" && echo "$rd_detect_bare" | grep -q "DETECT:no"; then
+    log_pass "redis: feature_detect yes on written drop-in, no on a bare fixture"
+else
+    log_fail "redis: feature_detect wrong (written=$rd_detect bare=$rd_detect_bare)"
+fi
+
+# 7. Panel-restricted host (DirectAdmin) -> manual-only, nothing written.
+RDP_FIX="${TEST_TMP}/rdp-fix"; RDP_DATA="${TEST_TMP}/rdp-data"
+mkdir -p "$RDP_DATA"; cp -R "${CONFIGS_DIR}/directadmin" "$RDP_FIX"; mkdir -p "$RDP_FIX/etc/php.d" "$RDP_FIX/etc/redis"
+printf 'port 6379\n' > "$RDP_FIX/etc/redis/redis.conf"
+rdp_out=$(LSO_DATA_DIR="$RDP_DATA" LSO_FS_ROOT="$RDP_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RDP_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --redis --force 2>&1 || true)
+if echo "$rdp_out" | grep -qi "manual-only" \
+    && [ ! -f "$RDP_FIX/etc/redis/litespeed-optimizer.conf" ]; then
+    log_pass "redis: panel-restricted (DirectAdmin) -> manual-only, nothing written"
+else
+    log_fail "redis: did not go manual-only on a panel-restricted host"
+fi
+
+# 8. Dry-run writes no drop-in and does not append the include, but logs the intent.
+RDD_FIX="${TEST_TMP}/rdd-fix"; RDD_DATA="${TEST_TMP}/rdd-data"
+mkdir -p "$RDD_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RDD_FIX"; mkdir -p "$RDD_FIX/etc/php.d" "$RDD_FIX/etc/redis"
+printf 'port 6379\n' > "$RDD_FIX/etc/redis/redis.conf"
+rdd_out=$(LSO_DATA_DIR="$RDD_DATA" LSO_FS_ROOT="$RDD_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RDD_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --redis --dry-run --force 2>&1 || true)
+if [ ! -f "$RDD_FIX/etc/redis/litespeed-optimizer.conf" ] \
+    && ! grep -qF "include /etc/redis/litespeed-optimizer.conf" "$RDD_FIX/etc/redis/redis.conf" 2>/dev/null \
+    && echo "$rdd_out" | grep -q '\[DRY RUN\] Would'; then
+    log_pass "redis: dry-run writes no drop-in, does not append include, logs '[DRY RUN] Would'"
+else
+    log_fail "redis: dry-run wrote a file / appended include / missing dry-run log"
+fi
+
+# 9. Unit-level backup-rollback: a marked drop-in created fresh (after the backup) must
+# be removed on rollback, and the appended include line in redis.conf reverts. An
+# unrelated pre-existing redis.conf line survives. Driven at the unit level (source
+# backup.sh directly), mirroring the mariadb/os-limits rollback tests.
+RDR_FIX="${TEST_TMP}/rdr-fix"; RDR_DATA="${TEST_TMP}/rdr-data"
+mkdir -p "$RDR_DATA"; cp -R "${CONFIGS_DIR}/plain-ols/." "$RDR_FIX/"
+(
+    set -euo pipefail
+    DATA_DIR="$RDR_DATA"; BACKUP_DIR="${DATA_DIR}/backups"; LOG_DIR="${DATA_DIR}/logs"
+    LOG_FILE="${LOG_DIR}/t.log"; VERSION="0.1.0-test"; QUIET=true DRY_RUN=false FORCE=true
+    : "$VERSION" "$QUIET" "$DRY_RUN" "$FORCE"   # consumed by sourced backup.sh (silence SC2034)
+    mkdir -p "$BACKUP_DIR" "$LOG_DIR"
+    log_info() { :; }; log_warn() { :; }; log_success() { :; }; log_error() { :; }
+    export LSO_FS_ROOT="$RDR_FIX" LSO_SKIP_RESTART=1
+    # shellcheck source=/dev/null
+    for m in helpers sysinfo detect-env confedit; do source "${ROOT_DIR}/lib/core/${m}.sh"; done
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/litespeed-optimizer-lib/backup.sh"
+    detect_environment
+    # redis.conf present BEFORE the backup, so create_backup captures its pre-run state.
+    mkdir -p "$RDR_FIX/etc/redis"
+    printf 'port 6379\n' > "$RDR_FIX/etc/redis/redis.conf"
+    create_backup "" >/dev/null 2>&1            # backup: redis.conf WITHOUT include, no drop-in
+    # Simulate a redis apply: write our marked drop-in + append the include AFTER the backup.
+    printf '# Managed by litespeed-optimizer\nmaxmemory 384mb\nmaxmemory-policy allkeys-lru\n' \
+        > "$RDR_FIX/etc/redis/litespeed-optimizer.conf"
+    printf '\n# Managed by litespeed-optimizer\ninclude /etc/redis/litespeed-optimizer.conf\n' \
+        >> "$RDR_FIX/etc/redis/redis.conf"
+    bts=$(ls -1 "$BACKUP_DIR" | head -1)
+    restore_backup_files "${BACKUP_DIR}/${bts}" >/dev/null 2>&1
+)
+if [ ! -f "$RDR_FIX/etc/redis/litespeed-optimizer.conf" ] \
+    && ! grep -qF "include /etc/redis/litespeed-optimizer.conf" "$RDR_FIX/etc/redis/redis.conf" 2>/dev/null \
+    && grep -q "port 6379" "$RDR_FIX/etc/redis/redis.conf" 2>/dev/null; then
+    log_pass "redis: rollback removes the added drop-in + reverts the include, keeps redis.conf"
+else
+    log_fail "redis: rollback drop-in/include handling wrong"
+fi
+
+# 10. Accurate logging (FIX C) + allkeys-lru data-loss warning (FIX D) + world-readable
+# drop-in (FIX B). Fresh apply -> success log says "include added"; re-apply -> "already
+# present"; the allkeys-lru eviction warning shows in fixtures; the drop-in is mode 644.
+RDC_FIX="${TEST_TMP}/rdc-fix"; RDC_DATA="${TEST_TMP}/rdc-data"
+mkdir -p "$RDC_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RDC_FIX"; mkdir -p "$RDC_FIX/etc/php.d" "$RDC_FIX/etc/redis"
+printf 'port 6379\n' > "$RDC_FIX/etc/redis/redis.conf"
+rdc_env() {
+    LSO_DATA_DIR="$RDC_DATA" LSO_FS_ROOT="$RDC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$RDC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+rdc_out1=$(rdc_env optimize --redis --force)
+rdc_out2=$(rdc_env optimize --redis --force)   # re-apply: include already present
+rdc_mode=$(stat -c '%a' "$RDC_FIX/etc/redis/litespeed-optimizer.conf" 2>/dev/null \
+    || stat -f '%Lp' "$RDC_FIX/etc/redis/litespeed-optimizer.conf" 2>/dev/null)
+rdc_ok=true
+echo "$rdc_out1" | grep -qi "include added in redis.conf"     || { log_fail "redis: first run did not log 'include added'"; rdc_ok=false; }
+echo "$rdc_out2" | grep -qi "include already present in redis.conf" || { log_fail "redis: re-apply did not log 'include already present'"; rdc_ok=false; }
+echo "$rdc_out1" | grep -qi "evicts ANY key under memory pressure"  || { log_fail "redis: allkeys-lru data-loss warning missing"; rdc_ok=false; }
+[ "$rdc_mode" = "644" ] || { log_fail "redis: drop-in mode is '$rdc_mode', expected 644 (world-readable)"; rdc_ok=false; }
+[ "$rdc_ok" = true ] && log_pass "redis: accurate include logging (added/already present) + allkeys-lru warning + 0644 drop-in"
+
+# 11. Dry-run logs the FIX C '[DRY RUN] would write ... and add the include' intent (no write).
+RDDC_FIX="${TEST_TMP}/rddc-fix"; RDDC_DATA="${TEST_TMP}/rddc-data"
+mkdir -p "$RDDC_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RDDC_FIX"; mkdir -p "$RDDC_FIX/etc/php.d" "$RDDC_FIX/etc/redis"
+printf 'port 6379\n' > "$RDDC_FIX/etc/redis/redis.conf"
+rddc_out=$(LSO_DATA_DIR="$RDDC_DATA" LSO_FS_ROOT="$RDDC_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RDDC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --redis --dry-run --force 2>&1 || true)
+if echo "$rddc_out" | grep -qi '\[DRY RUN\] would write .* and add the include' \
+    && [ ! -f "$RDDC_FIX/etc/redis/litespeed-optimizer.conf" ]; then
+    log_pass "redis: dry-run logs the '[DRY RUN] would write … add the include' intent (writes nothing)"
+else
+    log_fail "redis: dry-run FIX C wording missing or a file was written"
+fi
+
+# 12. Honest detect (FIX E): after a full --redis apply, removing ONLY the include line from
+# redis.conf must make feature_detect return non-zero (the drop-in is inert without it).
+RDE_FIX="${TEST_TMP}/rde-fix"; RDE_DATA="${TEST_TMP}/rde-data"
+mkdir -p "$RDE_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$RDE_FIX"; mkdir -p "$RDE_FIX/etc/php.d" "$RDE_FIX/etc/redis"
+printf 'port 6379\n' > "$RDE_FIX/etc/redis/redis.conf"
+LSO_DATA_DIR="$RDE_DATA" LSO_FS_ROOT="$RDE_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$RDE_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --redis --force >/dev/null 2>&1 || true
+# detect yes with the include present:
+rde_with=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$RDE_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/redis.sh"
+    if feature_detect_custom_redis; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+# Strip ONLY the include line from redis.conf (drop-in file stays).
+grep -vFx "include /etc/redis/litespeed-optimizer.conf" "$RDE_FIX/etc/redis/redis.conf" \
+    > "$RDE_FIX/etc/redis/redis.conf.tmp" && mv "$RDE_FIX/etc/redis/redis.conf.tmp" "$RDE_FIX/etc/redis/redis.conf"
+rde_without=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$RDE_FIX"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/redis.sh"
+    if feature_detect_custom_redis; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$rde_with" | grep -q "DETECT:yes" && echo "$rde_without" | grep -q "DETECT:no"; then
+    log_pass "redis: feature_detect honest — yes with include, no after the include is removed"
+else
+    log_fail "redis: detect did not correlate with the include line (with=$rde_with without=$rde_without)"
+fi
+
+################################################################################
 # SECTION 16: Analyze (scored audit)
 ################################################################################
 log_section "Analyze Tests"

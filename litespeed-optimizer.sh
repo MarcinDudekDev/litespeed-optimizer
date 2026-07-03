@@ -104,10 +104,15 @@ LSO_MARIADB="${LSO_MARIADB:-}"
 # / panel-managed hosts are manual-only, default-off.
 # shellcheck disable=SC2034  # consumed by lib/features/http3.sh
 LSO_HTTP3="${LSO_HTTP3:-}"
+# redis opt-in gate (set by --redis, or via env). Read as ${LSO_REDIS:-} by
+# lib/features/redis.sh. Writes an object-cache drop-in (maxmemory + allkeys-lru)
+# and includes it from redis.conf; panel-managed hosts are manual-only, default-off.
+# shellcheck disable=SC2034  # consumed by lib/features/redis.sh
+LSO_REDIS="${LSO_REDIS:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the REGISTERED features (lib/features/*.sh); keep this list in
-# sync with feature_register calls. Roadmap-only features (redis-tuning) are
+# sync with feature_register calls. Roadmap-only features (none) are
 # intentionally NOT here — accepting them would pass validation and then fail
 # at apply with "Feature not available".
 ALLOWED_FEATURES=(
@@ -124,6 +129,7 @@ ALLOWED_FEATURES=(
     "os-limits" "oslimits"
     "mariadb" "mysql" "db"
     "http3" "quic"
+    "redis" "redis-tuning"
 )
 
 ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
@@ -420,6 +426,9 @@ OPTIONS:
                                 opt-in (default: off)
     --http3                     enable HTTP/3 (QUIC) on OLS (tuning quicEnable 1);
                                 Enterprise/panel manual-only, opt-in (default: off)
+    --redis                     write a Redis object-cache tuning drop-in
+                                (maxmemory per RAM + allkeys-lru; includes it from
+                                redis.conf), opt-in (default: off)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -447,8 +456,9 @@ FEATURES (use with --feature / --exclude):
     http3                       HTTP/3 (QUIC) enablement on OLS — tuning quicEnable 1
                                 (opt-in via --http3; Enterprise/panel manual-only;
                                 NOT in default profiles)
-
-    Planned (not yet implemented; see ROADMAP.md): redis tuning
+    redis                       Redis object-cache tuning — maxmemory (per RAM tier)
+                                + allkeys-lru drop-in (opt-in via --redis; only when
+                                Redis present; NOT in default profiles)
 
 EXAMPLES:
     # Detect environment (edition, panel, paths)
@@ -993,6 +1003,14 @@ parse_arguments() {
                 # Server config; also select the feature (not in any default profile).
                 export LSO_HTTP3=1
                 [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="http3"
+                shift
+                ;;
+            --redis|--redis-tuning)
+                # Opt-in: write the Redis object-cache drop-in (maxmemory + allkeys-lru)
+                # and include it from redis.conf; also select the feature (not in any
+                # default profile).
+                export LSO_REDIS=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="redis"
                 shift
                 ;;
             --trusted-ip)
