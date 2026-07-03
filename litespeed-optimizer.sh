@@ -109,6 +109,12 @@ LSO_HTTP3="${LSO_HTTP3:-}"
 # and includes it from redis.conf; panel-managed hosts are manual-only, default-off.
 # shellcheck disable=SC2034  # consumed by lib/features/redis.sh
 LSO_REDIS="${LSO_REDIS:-}"
+# panel-config opt-in gate (set by --panel-config/--panel, or via env). Read as
+# ${LSO_PANEL_CONFIG:-} by lib/features/panel-config.sh. For panel-managed hosts
+# that own/regenerate server config: writes a ready-to-apply artifact + exact
+# apply steps to our data dir; never touches panel internals, default-off.
+# shellcheck disable=SC2034  # consumed by lib/features/panel-config.sh
+LSO_PANEL_CONFIG="${LSO_PANEL_CONFIG:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the REGISTERED features (lib/features/*.sh); keep this list in
@@ -130,6 +136,7 @@ ALLOWED_FEATURES=(
     "mariadb" "mysql" "db"
     "http3" "quic"
     "redis" "redis-tuning"
+    "panel-config" "panel"
 )
 
 ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
@@ -429,6 +436,11 @@ OPTIONS:
     --redis                     write a Redis object-cache tuning drop-in
                                 (maxmemory per RAM + allkeys-lru; includes it from
                                 redis.conf), opt-in (default: off)
+    --panel-config, --panel     for panel-managed hosts (DirectAdmin/RunCloud/
+                                Plesk/Enhance/ADC/…): generate a ready-to-apply
+                                recommended config + the exact DESTINATION path
+                                and APPLY steps for that panel; writes only to our
+                                data dir, never touches panel internals, opt-in
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -459,6 +471,11 @@ FEATURES (use with --feature / --exclude):
     redis                       Redis object-cache tuning — maxmemory (per RAM tier)
                                 + allkeys-lru drop-in (opt-in via --redis; only when
                                 Redis present; NOT in default profiles)
+    panel-config                Panel-specific server-config guidance — generates a
+                                ready-to-apply recommended config + exact apply steps
+                                for panels that own/regenerate config; never touches
+                                panel internals (opt-in via --panel-config; only on
+                                panel-managed hosts; NOT in default profiles)
 
 EXAMPLES:
     # Detect environment (edition, panel, paths)
@@ -1020,6 +1037,14 @@ parse_arguments() {
                 # default profile).
                 export LSO_REDIS=1
                 [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="redis"
+                shift
+                ;;
+            --panel-config|--panel)
+                # Opt-in: generate panel-specific server-config guidance + a
+                # ready-to-apply artifact for panels that own/regenerate config.
+                # Also select the feature (not in any default profile) unless named.
+                export LSO_PANEL_CONFIG=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="panel-config"
                 shift
                 ;;
             --trusted-ip)
