@@ -3076,6 +3076,127 @@ else
 fi
 
 ################################################################################
+# SECTION 15i: http3 Feature (HTTP/3 QUIC enablement; offline/fixture only)
+################################################################################
+log_section "http3 Feature Tests"
+
+H3_FIX="${TEST_TMP}/h3-fix"
+H3_DATA="${TEST_TMP}/h3-data"
+mkdir -p "$H3_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$H3_FIX"
+mkdir -p "$H3_FIX/etc/php.d"
+H3_CONF="$H3_FIX/usr/local/lsws/conf/httpd_config.conf"
+h3_env() {
+    LSO_DATA_DIR="$H3_DATA" LSO_FS_ROOT="$H3_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$H3_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" "$@" 2>&1 || true
+}
+
+# 1. Opt-in gate: selecting the feature WITHOUT --http3 must write nothing.
+h3_gate_out=$(h3_env optimize --feature http3 --force)
+if ! grep -qE 'quicEnable[[:space:]]+1' "$H3_CONF" 2>/dev/null \
+    && echo "$h3_gate_out" | grep -qi "pass --http3"; then
+    log_pass "http3: opt-in gate — nothing written without --http3 (guidance printed)"
+else
+    log_fail "http3: wrote quicEnable or gate message missing without --http3"
+fi
+
+# 2. --http3 sets tuning quicEnable to 1 in the fixture httpd_config.conf.
+h3_env optimize --http3 --force >/dev/null
+if grep -qE 'quicEnable[[:space:]]+1' "$H3_CONF" 2>/dev/null; then
+    log_pass "http3: --http3 sets tuning quicEnable 1 in httpd_config.conf"
+else
+    log_fail "http3: --http3 did not set quicEnable 1"
+fi
+
+# 3. Idempotent: re-apply keeps a single quicEnable line (no dup).
+h3_env optimize --http3 --force >/dev/null
+if [ "$(grep -cE 'quicEnable' "$H3_CONF")" = "1" ]; then
+    log_pass "http3: idempotent (single quicEnable line on re-apply)"
+else
+    log_fail "http3: duplicated quicEnable on re-apply"
+fi
+
+# 4. Already-enabled path: quicEnable already 1 -> 'already enabled' message, still detects.
+h3_already_out=$(h3_env optimize --http3 --force)
+if echo "$h3_already_out" | grep -qi "already enabled"; then
+    log_pass "http3: already-enabled fixture -> 'already enabled' path"
+else
+    log_fail "http3: did not report already-enabled on a quicEnable=1 config"
+fi
+
+# 5. feature_detect: yes on a quicEnable=1 config, no on the bare plain-ols fixture.
+H3N_FIX="${TEST_TMP}/h3n-fix"; mkdir -p "$H3N_FIX"; cp -R "${CONFIGS_DIR}/plain-ols" "$H3N_FIX"
+H3N_CONF="$H3N_FIX/usr/local/lsws/conf/httpd_config.conf"
+h3_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/http3.sh"
+    if feature_detect_custom_http3 "$H3_CONF"; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+h3_detect_bare=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/confedit.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/http3.sh"
+    if feature_detect_custom_http3 "$H3N_CONF"; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$h3_detect" | grep -q "DETECT:yes" && echo "$h3_detect_bare" | grep -q "DETECT:no"; then
+    log_pass "http3: feature_detect yes on quicEnable=1 config, no on a bare fixture"
+else
+    log_fail "http3: feature_detect wrong (written=$h3_detect bare=$h3_detect_bare)"
+fi
+
+# 6. Enterprise (cpanel-enterprise) -> manual-only, no write to the read-only XML.
+H3E_FIX="${TEST_TMP}/h3e-fix"; H3E_DATA="${TEST_TMP}/h3e-data"
+mkdir -p "$H3E_DATA"; cp -R "${CONFIGS_DIR}/cpanel-enterprise" "$H3E_FIX"; mkdir -p "$H3E_FIX/etc/php.d"
+H3E_XML="$H3E_FIX/usr/local/lsws/conf/httpd_config.xml"
+h3e_xml_before=$(cat "$H3E_XML" 2>/dev/null)
+h3e_out=$(LSO_DATA_DIR="$H3E_DATA" LSO_FS_ROOT="$H3E_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$H3E_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --http3 --force 2>&1 || true)
+if echo "$h3e_out" | grep -qi "manual-only" \
+    && [ "$h3e_xml_before" = "$(cat "$H3E_XML" 2>/dev/null)" ] \
+    && ! grep -qi "quicEnable" "$H3E_XML" 2>/dev/null; then
+    log_pass "http3: Enterprise -> manual-only, XML untouched"
+else
+    log_fail "http3: did not go manual-only / touched the XML on Enterprise"
+fi
+
+# 7. Panel-restricted host (DirectAdmin) -> manual-only, nothing written.
+H3P_FIX="${TEST_TMP}/h3p-fix"; H3P_DATA="${TEST_TMP}/h3p-data"
+mkdir -p "$H3P_DATA"; cp -R "${CONFIGS_DIR}/directadmin" "$H3P_FIX"; mkdir -p "$H3P_FIX/etc/php.d"
+H3P_CONF="$H3P_FIX/usr/local/lsws/conf/httpd_config.conf"
+h3p_out=$(LSO_DATA_DIR="$H3P_DATA" LSO_FS_ROOT="$H3P_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$H3P_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --http3 --force 2>&1 || true)
+if echo "$h3p_out" | grep -qi "manual-only" \
+    && ! grep -qE 'quicEnable[[:space:]]+1' "$H3P_CONF" 2>/dev/null; then
+    log_pass "http3: panel-restricted (DirectAdmin) -> manual-only, nothing written"
+else
+    log_fail "http3: did not go manual-only on a panel-restricted host"
+fi
+
+# 8. Dry-run writes nothing (quicEnable unchanged) but logs the intended write.
+H3D_FIX="${TEST_TMP}/h3d-fix"; H3D_DATA="${TEST_TMP}/h3d-data"
+mkdir -p "$H3D_DATA"; cp -R "${CONFIGS_DIR}/plain-ols" "$H3D_FIX"; mkdir -p "$H3D_FIX/etc/php.d"
+H3D_CONF="$H3D_FIX/usr/local/lsws/conf/httpd_config.conf"
+h3d_out=$(LSO_DATA_DIR="$H3D_DATA" LSO_FS_ROOT="$H3D_FIX" LSO_RAM_MB=4096 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$H3D_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --http3 --dry-run --force 2>&1 || true)
+if ! grep -qE 'quicEnable[[:space:]]+1' "$H3D_CONF" 2>/dev/null \
+    && echo "$h3d_out" | grep -q '\[DRY RUN\] Would'; then
+    log_pass "http3: dry-run writes nothing (quicEnable unchanged) but logs '[DRY RUN] Would'"
+else
+    log_fail "http3: dry-run wrote quicEnable or missing dry-run log"
+fi
+
+################################################################################
 # SECTION 16: Analyze (scored audit)
 ################################################################################
 log_section "Analyze Tests"

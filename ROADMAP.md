@@ -39,16 +39,18 @@ Canonical spec: docs/research/SPEC.md
 ## Remaining
 **Offline-buildable next (SPEC §§ T2.3/T2.4/T3.4, lines 167–170 — standard OS/DB/OLS config paths,
 RAM-tier values; no live panel box required, fixture-testable like server-tuning/opcache):**
-- [ ] **`os-limits`** — `/etc/systemd/system/lsws.service.d/override.conf` (LimitNOFILE=65535) +
+- [x] **`os-limits`** (PR #45) — `/etc/systemd/system/lsws.service.d/override.conf` (LimitNOFILE=65535) +
   `/etc/sysctl.d/99-litespeed.conf` (somaxconn 4096, syn_backlog 8192, fin_timeout 15, tw_reuse 1,
   swappiness 10, bbr+fq if available)
-- [ ] **`mariadb`** — `99-woocommerce.cnf` drop-in (`/etc/mysql/mariadb.conf.d/` or `/etc/my.cnf.d/`):
+- [x] **`mariadb`** (PR #46) — `99-woocommerce.cnf` drop-in (`/etc/mysql/mariadb.conf.d/` or `/etc/my.cnf.d/`):
   buffer pool 256M/512M/1–1.5G/2.5–3G per RAM tier, log_file 25% of pool, O_DIRECT, trx_commit=1,
   slow log 0.5s; restart mariadb only with `--force`/off-peak
-- [ ] **`http3`** — verify `enableQuic`/listener UDP, `ufw allow 443/udp`, CSF UDPFLOOD warn (don't
-  auto-edit csf.conf), verify via `curl --http3 -I` when available
-- [ ] **`redis`** server-side tuning (maxmemory + eviction policy) — scope TBD
+- [x] **`http3`** (issue #47) — opt-in `--http3`; on OLS flips `quicEnable 1` in the server `tuning{}`
+  block (LIVE-verified on OLS 1.9.0 — NOT `enableQuic` on a listener); Enterprise/panel manual-only;
+  advises `ufw allow 443/udp`, warns CSF UDPFLOOD must be 0 (never edits csf.conf); guarded
+  `curl --http3` verification hint when curl supports it
+- [ ] **`redis`** server-side tuning (maxmemory + eviction policy) — include-based drop-in, issue #48
 
-**Needs a live box / external account (not verifiable offline — parked on operator resources):**
-- DirectAdmin/RunCloud server-config write paths (panel regeneration clobbers direct edits — manual-steps only today)
-- LiteSpeed Web ADC, Plesk/Enhance panel detection + write paths
+**Needs a live box / external account (not verifiable offline — parked on operator resources; tracked as issues #50–54):**
+- DirectAdmin (#50) / RunCloud (#51) server-config write paths (panel regeneration clobbers direct edits — manual-steps only today)
+- Plesk (#52) / Enhance (#53) panel detection + write paths; LiteSpeed Web ADC (#54)

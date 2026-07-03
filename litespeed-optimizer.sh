@@ -99,11 +99,16 @@ LSO_OS_LIMITS="${LSO_OS_LIMITS:-}"
 # only, never httpd_config), default-off.
 # shellcheck disable=SC2034  # consumed by lib/features/mariadb.sh
 LSO_MARIADB="${LSO_MARIADB:-}"
+# http3 opt-in gate (set by --http3, or via env). Read as ${LSO_HTTP3:-} by
+# lib/features/http3.sh. Flips tuning quicEnable 1 on OLS (server config); Enterprise
+# / panel-managed hosts are manual-only, default-off.
+# shellcheck disable=SC2034  # consumed by lib/features/http3.sh
+LSO_HTTP3="${LSO_HTTP3:-}"
 
 # Allowed feature names / aliases for --feature and --exclude.
 # These are the REGISTERED features (lib/features/*.sh); keep this list in
-# sync with feature_register calls. Roadmap-only features (http3, redis-tuning)
-# are intentionally NOT here — accepting them would pass validation and then fail
+# sync with feature_register calls. Roadmap-only features (redis-tuning) are
+# intentionally NOT here — accepting them would pass validation and then fail
 # at apply with "Feature not available".
 ALLOWED_FEATURES=(
     "server-tuning" "tuning"
@@ -118,6 +123,7 @@ ALLOWED_FEATURES=(
     "recaptcha" "captcha"
     "os-limits" "oslimits"
     "mariadb" "mysql" "db"
+    "http3" "quic"
 )
 
 ALLOWED_PROFILES=("auto" "generic" "wordpress" "woocommerce")
@@ -412,6 +418,8 @@ OPTIONS:
     --mariadb                   write a MariaDB InnoDB tuning drop-in
                                 (99-woocommerce.cnf; RAM-tier buffer pool),
                                 opt-in (default: off)
+    --http3                     enable HTTP/3 (QUIC) on OLS (tuning quicEnable 1);
+                                Enterprise/panel manual-only, opt-in (default: off)
     --no-color                  Disable colored output (also: NO_COLOR env var)
     -v, --version               Show version
 
@@ -436,8 +444,11 @@ FEATURES (use with --feature / --exclude):
     mariadb                     MariaDB InnoDB tuning for WooCommerce/WordPress —
                                 RAM-tier buffer pool (opt-in via --mariadb; NOT in
                                 default profiles)
+    http3                       HTTP/3 (QUIC) enablement on OLS — tuning quicEnable 1
+                                (opt-in via --http3; Enterprise/panel manual-only;
+                                NOT in default profiles)
 
-    Planned (not yet implemented; see ROADMAP.md): http3 · redis tuning
+    Planned (not yet implemented; see ROADMAP.md): redis tuning
 
 EXAMPLES:
     # Detect environment (edition, panel, paths)
@@ -975,6 +986,13 @@ parse_arguments() {
                 # DB config only; also select the feature (not in any default profile).
                 export LSO_MARIADB=1
                 [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="mariadb"
+                shift
+                ;;
+            --http3|--quic)
+                # Opt-in: enable HTTP/3 (QUIC) by flipping tuning quicEnable 1 on OLS.
+                # Server config; also select the feature (not in any default profile).
+                export LSO_HTTP3=1
+                [ -z "$SPECIFIC_FEATURE" ] && SPECIFIC_FEATURE="http3"
                 shift
                 ;;
             --trusted-ip)
