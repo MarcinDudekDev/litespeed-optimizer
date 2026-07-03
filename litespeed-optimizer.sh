@@ -754,6 +754,15 @@ cmd_rollback() {
     fi
 
     if [ -z "$backup_timestamp" ]; then
+        # No timestamp given. The prompt below needs a TTY — over a non-interactive
+        # stdin (ssh without -t, CI, automation) `read` hits EOF and would silently
+        # no-op, so fail loud instead with a clear pointer to the explicit form.
+        if [ ! -t 0 ]; then
+            log_error "rollback: no backup timestamp given and not running interactively."
+            log_error "  List them:    litespeed-optimizer rollback --list"
+            log_error "  Then restore: litespeed-optimizer rollback <YYYYMMDD-HHMMSS>"
+            exit 1
+        fi
         log_info "Available backups:"
         ls -1 "${BACKUP_DIR}" 2>/dev/null | tail -10 || true
         echo ""
