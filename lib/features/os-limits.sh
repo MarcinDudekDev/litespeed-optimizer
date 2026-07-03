@@ -55,9 +55,11 @@ _ol_write_file() {
     mkdir -p "$dir" || { log_warn "os-limits: cannot create ${dir}"; return 1; }
     local tmp
     tmp=$(secure_mktemp "${dir}/.lso-oslimits.XXXXXX") || return 1
-    cat > "$tmp"
+    # errexit is OFF inside `if feature_apply ...`, so a silent cat/mv failure would
+    # otherwise skip rollback — propagate it explicitly (mirrors mariadb's _mdb_write_file).
+    cat > "$tmp" || { rm -f "$tmp"; return 1; }
     copy_file_permissions "$file" "$tmp" 2>/dev/null || true
-    mv "$tmp" "$file"
+    mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
     log_info "Wrote ${file#${LSO_FS_ROOT:-}}"
 }
 
