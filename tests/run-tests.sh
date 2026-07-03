@@ -3481,6 +3481,179 @@ else
 fi
 
 ################################################################################
+# SECTION 15k: panel-config Feature (panel-specific guidance + artifact; offline)
+################################################################################
+log_section "panel-config Feature Tests"
+
+# panel-config fires ONLY on regenerate/own-config panels. Fixtures are a full
+# plain-ols OLS tree (so detect_environment succeeds) with the target panel's
+# marker dir added, so _detect_panel resolves that panel. The artifact lands at
+# ${FIX}${LSO_DATA_DIR}/panel-config/<panel>-recommended.conf (outfile goes
+# through _lso_fs, so under LSO_FS_ROOT the data dir path is prefixed by it).
+PC_ROOT="${TEST_TMP}/panelcfg"
+mkdir -p "$PC_ROOT"
+
+# pc_build <name> <marker-reldir> -> prints the built fixture dir path
+pc_build() {
+    local name="$1" marker="$2"
+    local fix="${PC_ROOT}/${name}-fix"
+    rm -rf "$fix"
+    cp -R "${CONFIGS_DIR}/plain-ols" "$fix"
+    mkdir -p "${fix}/etc/php.d"
+    [ -n "$marker" ] && mkdir -p "${fix}${marker}"
+    printf '%s' "$fix"
+}
+
+# pc_run <fix> <data> <optimize-args...> -> runs the optimizer, echoes output
+pc_run() {
+    local fix="$1" data="$2"; shift 2
+    mkdir -p "$data"
+    LSO_DATA_DIR="$data" LSO_FS_ROOT="$fix" LSO_RAM_MB="${PC_RAM:-4096}" LSO_CORES=4 \
+        LSO_PHP_INI_SCAN_DIR="$fix/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+        "${OPTIMIZER}" optimize "$@" 2>&1 || true
+}
+
+# pc_outfile <fix> <data> <panel> -> the artifact path for that panel
+pc_outfile() {
+    printf '%s%s/panel-config/%s-recommended.conf' "$1" "$2" "$3"
+}
+
+# 1-5. Per-panel: --panel-config writes the artifact with the managed marker AND
+# the correct panel-specific DESTINATION path + APPLY command. panel|marker|token1|token2
+# (token2 optional; both must be present when given).
+pc_case() {
+    local panel="$1" marker="$2" tok1="$3" tok2="${4:-}"
+    local fix data out
+    fix=$(pc_build "$panel" "$marker")
+    data="${PC_ROOT}/${panel}-data"
+    pc_run "$fix" "$data" --panel-config --force >/dev/null
+    out=$(pc_outfile "$fix" "$data" "$panel")
+    local ok=true
+    [ -f "$out" ] || { ok=false; }
+    grep -q "Managed by litespeed-optimizer" "$out" 2>/dev/null || ok=false
+    grep -q "$tok1" "$out" 2>/dev/null || ok=false
+    [ -n "$tok2" ] && { grep -q "$tok2" "$out" 2>/dev/null || ok=false; }
+    if [ "$ok" = true ]; then
+        log_pass "panel-config: ${panel} -> artifact written w/ marker + '${tok1}'${tok2:+ + '${tok2}'}"
+    else
+        log_fail "panel-config: ${panel} artifact missing marker or panel tokens ('${tok1}'${tok2:+/'${tok2}'})"
+    fi
+}
+pc_case directadmin "/usr/local/directadmin" ".cust_httpd" "rewrite_confs"
+pc_case plesk       "/usr/local/psa"         "vhost.conf"
+pc_case enhance     "/var/local/enhance"     "vhost_includes"
+pc_case runcloud    "/etc/runcloud"          "nginx-rc"       "does NOT run LiteSpeed"
+pc_case adc         "/usr/local/lslb"        "lslb"           "load balancer"
+
+# 6. Opt-in gate: selecting the feature WITHOUT --panel-config writes nothing.
+PC_G_FIX=$(pc_build "gate" "/usr/local/directadmin"); PC_G_DATA="${PC_ROOT}/gate-data"
+pc_gate_out=$(pc_run "$PC_G_FIX" "$PC_G_DATA" --feature panel-config --force)
+if [ ! -f "$(pc_outfile "$PC_G_FIX" "$PC_G_DATA" directadmin)" ] \
+    && echo "$pc_gate_out" | grep -qi "pass --panel-config"; then
+    log_pass "panel-config: opt-in gate — nothing written without --panel-config (guidance printed)"
+else
+    log_fail "panel-config: wrote a file or gate message missing without --panel-config"
+fi
+
+# 7. Non-restricted panel (plain OLS, no marker) -> info only, nothing written.
+PC_P_FIX=$(pc_build "plain" ""); PC_P_DATA="${PC_ROOT}/plain-data"
+pc_plain_out=$(pc_run "$PC_P_FIX" "$PC_P_DATA" --panel-config --force)
+if [ ! -f "$(pc_outfile "$PC_P_FIX" "$PC_P_DATA" plain)" ] \
+    && echo "$pc_plain_out" | grep -qi "not a regenerate-owning panel"; then
+    log_pass "panel-config: non-restricted panel (plain) -> info only, nothing generated"
+else
+    log_fail "panel-config: generated an artifact on a non-restricted panel"
+fi
+
+# 8. Idempotent: re-apply keeps a single clean, marked artifact (no duplication).
+PC_I_FIX=$(pc_build "idem" "/usr/local/psa"); PC_I_DATA="${PC_ROOT}/idem-data"
+pc_run "$PC_I_FIX" "$PC_I_DATA" --panel-config --force >/dev/null
+pc_run "$PC_I_FIX" "$PC_I_DATA" --panel-config --force >/dev/null
+PC_I_OUT=$(pc_outfile "$PC_I_FIX" "$PC_I_DATA" plesk)
+if [ -f "$PC_I_OUT" ] \
+    && [ "$(grep -c "Managed by litespeed-optimizer" "$PC_I_OUT")" = "1" ] \
+    && grep -q "vhost.conf" "$PC_I_OUT" 2>/dev/null; then
+    log_pass "panel-config: idempotent (single clean marked artifact on re-apply)"
+else
+    log_fail "panel-config: re-apply duplicated or corrupted the artifact"
+fi
+
+# 9. Ownership guard: an UNMARKED pre-existing artifact must survive UNCHANGED.
+PC_H_FIX=$(pc_build "own" "/usr/local/directadmin"); PC_H_DATA="${PC_ROOT}/own-data"
+PC_H_OUT=$(pc_outfile "$PC_H_FIX" "$PC_H_DATA" directadmin)
+mkdir -p "$(dirname "$PC_H_OUT")"
+echo "operator's own notes" > "$PC_H_OUT"   # unmarked, operator-owned
+pc_own_out=$(pc_run "$PC_H_FIX" "$PC_H_DATA" --panel-config --force)
+if echo "$pc_own_out" | grep -qi "refusing to overwrite" \
+    && grep -q "operator's own notes" "$PC_H_OUT" \
+    && ! grep -q "Managed by litespeed-optimizer" "$PC_H_OUT"; then
+    log_pass "panel-config: refuses to overwrite an unmarked operator artifact (content preserved)"
+else
+    log_fail "panel-config: clobbered or did not refuse an unmarked operator artifact"
+fi
+
+# 10. Dry-run writes nothing but still logs the intended write.
+PC_D_FIX=$(pc_build "dry" "/usr/local/directadmin"); PC_D_DATA="${PC_ROOT}/dry-data"
+pc_dry_out=$(pc_run "$PC_D_FIX" "$PC_D_DATA" --panel-config --dry-run --force)
+if [ ! -f "$(pc_outfile "$PC_D_FIX" "$PC_D_DATA" directadmin)" ] \
+    && echo "$pc_dry_out" | grep -q '\[DRY RUN\] Would write'; then
+    log_pass "panel-config: dry-run writes nothing but logs '[DRY RUN] Would write'"
+else
+    log_fail "panel-config: dry-run wrote a file or missing dry-run log"
+fi
+
+# 11. feature_detect: yes on a written artifact, no on a bare fixture (no artifact).
+PC_DET_FIX=$(pc_build "det" "/usr/local/psa"); PC_DET_DATA="${PC_ROOT}/det-data"
+pc_run "$PC_DET_FIX" "$PC_DET_DATA" --panel-config --force >/dev/null
+pc_detect=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="$PC_DET_FIX" LSO_DATA_DIR="$PC_DET_DATA" LSO_PANEL="plesk"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/panel-config.sh"
+    if feature_detect_custom_panel_config; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+pc_detect_bare=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    export LSO_FS_ROOT="${PC_ROOT}/nope" LSO_DATA_DIR="${PC_ROOT}/nope-data" LSO_PANEL="plesk"
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/core/sysinfo.sh"
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/panel-config.sh"
+    if feature_detect_custom_panel_config; then echo "DETECT:yes"; else echo "DETECT:no"; fi
+)
+if echo "$pc_detect" | grep -q "DETECT:yes" && echo "$pc_detect_bare" | grep -q "DETECT:no"; then
+    log_pass "panel-config: feature_detect yes on written artifact, no on a bare fixture"
+else
+    log_fail "panel-config: feature_detect wrong (written=$pc_detect bare=$pc_detect_bare)"
+fi
+
+# 12. _pc_domain only trusts a real dotted hostname; generic docroots (/var/www/html,
+#     /home/<user>/public_html) fall back to the placeholder rather than a wrong name
+#     (grok M1 + security defense-in-depth on hostile directory names).
+pc_dom=$(
+    log_info() { :; }; log_warn() { :; }; log_error() { :; }; log_success() { :; }
+    secure_mktemp() { :; }; copy_file_permissions() { :; }; feature_register() { :; }
+    _lso_fs() { echo "${LSO_FS_ROOT:-}$1"; }
+    # shellcheck source=/dev/null
+    source "${ROOT_DIR}/lib/features/panel-config.sh"
+    LSO_WP_SITES=(/home/example.com/public_html); printf 'D1=%s ' "$(_pc_domain)"
+    LSO_WP_SITES=(/var/www/html);                 printf 'D2=%s ' "$(_pc_domain)"
+    LSO_WP_SITES=(/home/user/public_html);        printf 'D3=%s ' "$(_pc_domain)"
+    unset LSO_WP_SITES;                           printf 'D4=%s'  "$(_pc_domain)"
+)
+if [ "$pc_dom" = "D1=example.com D2=<your-domain> D3=<your-domain> D4=<your-domain>" ]; then
+    log_pass "panel-config: _pc_domain uses a dotted host, else falls back to <your-domain>"
+else
+    log_fail "panel-config: _pc_domain derivation wrong ($pc_dom)"
+fi
+
+################################################################################
 # SECTION 16: Analyze (scored audit)
 ################################################################################
 log_section "Analyze Tests"
