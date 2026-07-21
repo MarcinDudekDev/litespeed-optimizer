@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **`dynReqPerSec` 2 → 30 — the throttling default was banning real visitors.** Every OLS install got `perClientConnLimit { dynReqPerSec 2 }` regardless of RAM tier, but one logged-in WordPress pageview fires `admin-ajax` + REST + `wp-cron` and exceeds 2 dynamic req/s unaided, so ordinary users (and every NAT'd office) were banned for `banPeriod` 300s. Worse, OLS re-arms the ban on each rejected request, so anyone who hit reload extended their own ban — observed live on `litespeed-demo` as a climbing `overlimit: 214s → 229s → … → 290s` with `cur conns: 1`, surfacing publicly as Cloudflare 520s. The `--trusted-ip` escape hatch the header comment promised for "v0.2" never shipped, leaving no workaround. New default is 30, overridable via `LSO_DYN_REQ_PER_SEC`.
+- **`feature_detect_custom_security` accepted only `dynReqPerSec` 1–5**, so a correctly throttled server was reported as unconfigured (and re-"fixed" on every run) once the default moved above 5. Now any positive cap counts as applied.
+
+### Tests
+- Golden fixtures (`plain-ols-1g/2g/4g/8g`) and the throttling-block assertion updated to 30. Suite green at **469 pass / 0 fail**; `shellcheck --severity=error` clean.
+
 ## [0.8.0] - 2026-06-30 (offline roadmap cleared — multi-site, bad-bot blocker, load testing, atomic optimize)
 
 Five PRs (#24–#30) clearing every offline-implementable roadmap item, each independently grok-reviewed. Live-server work (ModSecurity/CRS, fail2ban, reCAPTCHA/QUIC.cloud) stays deferred.

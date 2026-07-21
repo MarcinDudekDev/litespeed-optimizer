@@ -1848,7 +1848,7 @@ sec_out=$(LSO_DATA_DIR="$SEC_DATA" LSO_FS_ROOT="$SEC_FIX" LSO_RAM_MB=4096 LSO_CO
 SEC_CONF="$SEC_FIX/usr/local/lsws/conf/httpd_config.conf"
 sec_block=$(awk '/^perClientConnLimit \{/,/^\}/' "$SEC_CONF")
 sec_ok=true
-for kv in "dynReqPerSec 2" "staticReqPerSec 40" "softLimit 15" "hardLimit 20" "gracePeriod 15" "banPeriod 300" "blockBadReq 1"; do
+for kv in "dynReqPerSec 30" "staticReqPerSec 40" "softLimit 15" "hardLimit 20" "gracePeriod 15" "banPeriod 300" "blockBadReq 1"; do
     if ! echo "$sec_block" | grep -qE "$(echo "$kv" | awk '{print $1}')[[:space:]]+$(echo "$kv" | awk '{print $2}')\$"; then
         log_fail "security: $kv not set"
         sec_ok=false

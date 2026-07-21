@@ -4,8 +4,12 @@
 # features/security.sh - Per-Client Throttling + Hardening (SPEC §6 security)
 ################################################################################
 # OLS:  perClientConnLimit block in main config (SYNTHESIS §6 values).
-#       Caveat: NAT'd offices can trip dynReqPerSec 2 — --trusted-ip support
-#       is a v0.2 item; values are conservative-but-sane defaults.
+#       dynReqPerSec is 30, NOT the 2 shipped through v0.10: a single logged-in
+#       WordPress pageview fires admin-ajax + REST + wp-cron and blows past 2/s
+#       on its own, so 2 banned ordinary visitors (and every NAT'd office) for
+#       banPeriod seconds — and because OLS re-arms the ban on each rejected
+#       request, a user who hits reload extends their own ban. Override with
+#       LSO_DYN_REQ_PER_SEC when a site genuinely needs a tighter cap.
 # LSWS: WordPressProtect via Apache include (brute-force drop after 10 tries).
 # reCAPTCHA: report-only (needs user keys). ModSecurity: detect+report only
 #       (OLS supports ModSec 3.x ONLY; CRS false-positive risk on checkout).
@@ -15,7 +19,7 @@ _sec_apply_ols_throttling() {
     local conf="$1"
     local block="perClientConnLimit"
 
-    lso_conf_set "$conf" "$block" dynReqPerSec 2
+    lso_conf_set "$conf" "$block" dynReqPerSec "${LSO_DYN_REQ_PER_SEC:-30}"
     lso_conf_set "$conf" "$block" staticReqPerSec 40
     lso_conf_set "$conf" "$block" softLimit 15
     lso_conf_set "$conf" "$block" hardLimit 20
@@ -240,7 +244,7 @@ feature_apply_custom_security() {
         # would be clobbered. Print it as a manual step (matches the optimizer's
         # panel policy) and still apply the per-site .htaccess hardening below.
         log_warn "security: ${LSO_PANEL} manages server config — perClientConnLimit throttling is manual-only"
-        log_info "  Add via the panel/WebAdmin (it will persist): perClientConnLimit { dynReqPerSec 2; staticReqPerSec 40; softLimit 15; hardLimit 20; gracePeriod 15; banPeriod 300; blockBadReq 1 }"
+        log_info "  Add via the panel/WebAdmin (it will persist): perClientConnLimit { dynReqPerSec ${LSO_DYN_REQ_PER_SEC:-30}; staticReqPerSec 40; softLimit 15; hardLimit 20; gracePeriod 15; banPeriod 300; blockBadReq 1 }"
     else
         local conf="${LSO_MAIN_CONF:-}"
         if [ -z "$conf" ] || [ ! -f "$conf" ]; then
@@ -278,7 +282,10 @@ feature_detect_custom_security() {
     v=$(ols_get "$config_file" perClientConnLimit blockBadReq 2>/dev/null) || return 1
     [ "$v" = "1" ] || return 1
     v=$(ols_get "$config_file" perClientConnLimit dynReqPerSec 2>/dev/null) || return 1
-    [ -n "$v" ] && [ "$v" -ge 1 ] && [ "$v" -le 5 ]
+    # Any positive cap counts as "throttling applied". The old 1..5 window
+    # predates the dynReqPerSec 2 -> 30 fix and would report a correctly
+    # configured server as unconfigured.
+    [ -n "$v" ] && [ "$v" -ge 1 ]
 }
 
 FEATURE_ID="security"
