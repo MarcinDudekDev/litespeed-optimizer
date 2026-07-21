@@ -449,9 +449,18 @@ run_analyze() {
     # Security (server-level)
     ############################################################
     if [ "$LSO_EDITION" = "ols" ]; then
+        # A cap under 10 is an ANTIPATTERN, not tight security: one logged-in
+        # WordPress pageview (admin-ajax + REST + wp-cron) clears it unaided, so
+        # ordinary visitors and anyone behind NAT get banned for banPeriod, and
+        # OLS re-arms the ban on every rejected request — a user who reloads
+        # extends their own ban. The ban drops the connection instead of
+        # answering, so behind a CDN it surfaces as a bare 502/520 that looks
+        # like origin failure. Versions through v0.10 shipped 2 here.
         v=$(ols_get "$conf" perClientConnLimit dynReqPerSec 2>/dev/null) || v=""
-        if _az_num_ok "$v" ge 1 && _az_num_ok "$v" le 5; then
+        if _az_num_ok "$v" ge 10; then
             _az_check 4 security "dynReqPerSec throttling sane ($v)" pass ""
+        elif _az_num_ok "$v" ge 1; then
+            _az_check 4 security "dynReqPerSec is '$v' — too low, throttles real visitors (one WP pageview exceeds it; NAT'd users banned for banPeriod)" fail "optimize --feature security"
         else
             _az_check 4 security "dynReqPerSec is '${v:-unset}' (0/unset = no dynamic throttle)" fail "optimize --feature security"
         fi

@@ -1856,6 +1856,48 @@ for kv in "dynReqPerSec 30" "staticReqPerSec 40" "softLimit 15" "hardLimit 20" "
 done
 [ "$sec_ok" = true ] && log_pass "security: full perClientConnLimit throttling block applied"
 
+# The applied value must survive its own detector: through v0.10 the feature
+# wrote dynReqPerSec 2 while feature_detect accepted only 1..5 and the audit
+# rewarded 1..5 as "sane", so raising the default would have made a correctly
+# configured server report as unconfigured and re-"fixed" on every run.
+if (
+    # shellcheck source=/dev/null
+    . "${ROOT_DIR}/lib/core/helpers.sh" 2>/dev/null
+    # shellcheck source=/dev/null
+    . "${ROOT_DIR}/lib/core/confedit.sh" 2>/dev/null
+    # security.sh ends in feature_register, so registry.sh must be loaded first.
+    # shellcheck source=/dev/null
+    . "${ROOT_DIR}/lib/registry.sh" 2>/dev/null
+    # shellcheck source=/dev/null
+    . "${ROOT_DIR}/lib/features/security.sh" 2>/dev/null
+    LSO_EDITION=ols feature_detect_custom_security "$SEC_CONF"
+) 2>/dev/null; then
+    log_pass "security: applied throttling is recognised by its own detector (no 1..5 window)"
+else
+    log_fail "security: feature_detect_custom_security rejects the value the feature just applied"
+fi
+
+# dynReqPerSec < 10 is an antipattern (bans real users), not tight security.
+sec_low_conf="${SEC_FIX}/usr/local/lsws/conf/httpd_config_lowthrottle.conf"
+sed 's/dynReqPerSec[[:space:]]\{1,\}30/dynReqPerSec                   2/' "$SEC_CONF" > "$sec_low_conf"
+if grep -qE "dynReqPerSec[[:space:]]+2$" "$sec_low_conf"; then
+    log_pass "security: low-throttle fixture built for antipattern check"
+else
+    log_fail "security: could not build low-throttle fixture"
+fi
+if (
+    # shellcheck source=/dev/null
+    . "${ROOT_DIR}/lib/core/helpers.sh" 2>/dev/null
+    # shellcheck source=/dev/null
+    . "${ROOT_DIR}/lib/core/confedit.sh" 2>/dev/null
+    v=$(ols_get "$sec_low_conf" perClientConnLimit dynReqPerSec 2>/dev/null)
+    [ "$v" = "2" ]
+) 2>/dev/null; then
+    log_pass "security: dynReqPerSec 2 is readable as the antipattern value the audit must fail"
+else
+    log_fail "security: antipattern fixture does not read back as 2"
+fi
+
 # Security headers deployed to the WP site .htaccess (makes `headers` alias real)
 SEC_HT="$SEC_FIX/home/example.com/public_html/.htaccess"
 if grep -q "# BEGIN litespeed-optimizer headers" "$SEC_HT" 2>/dev/null \
