@@ -14,18 +14,50 @@
 
 OPCACHE_INI_NAME="99-litespeed-optimizer-opcache.ini"
 
+# opcache.max_accelerated_files is NOT used as written: PHP rounds it UP to the
+# next entry of a fixed prime table before sizing the hash. Measured on PHP
+# 8.5.1 via opcache_get_status()['opcache_statistics']['max_cached_keys'] —
+# note opcache_get_configuration() lies here, it echoes back the raw ini value:
+#
+#   1000 -> 1979    8000 -> 16229   20000 -> 32531   50000 -> 65407
+#   2000 -> 3907   10000 -> 16229   30000 -> 32531  100000 -> 130987
+#   4000 -> 7963   16229 -> 16229   32531 -> 32531
+#
+# So the old table (1g/2g=20000, 4g=30000, 8g=50000) resolved to 32531/32531/
+# 65407 — the 4g tier's apparent +50% over 2g bought exactly zero extra slots.
+# Every value below is a real prime-table entry, so the ini now states what PHP
+# will actually do, and each tier is a genuine step up from the one below it.
+#
+# Sizing rationale (SHIFT64 benchmark, see README "Credits & Inspiration"):
+# one realistically-equipped WooCommerce store measures 5,168 slots / 98.6MB of
+# opcodes / 21.5MB of interned strings — i.e. ~19.5KB of opcode per file. At
+# that density a tier's pool (memory_consumption minus the interned buffer) can
+# physically hold: 1g ~2.5k files, 2g ~5.4k, 4g/8g ~11.7k. Each tier is given
+# ~3x that as headroom, because the two failure modes are wildly asymmetric —
+# a spare slot costs ~48 bytes of pool, while running out of slots makes
+# OPcache silently stop caching (it has no eviction policy) and recompile
+# hundreds of files per request. Oversize deliberately; do not "right-size".
 _opcache_max_files() {
     case "$1" in
-        1g|2g) echo 20000 ;;
-        4g)    echo 30000 ;;
-        *)     echo 50000 ;;
+        1g) echo 7963 ;;
+        2g) echo 16229 ;;
+        4g) echo 32531 ;;
+        *)  echo 65407 ;;
     esac
 }
 
+# interned_strings_buffer is carved OUT of memory_consumption, so it cannot be
+# oversized as freely as the slot count. One equipped Woo store measures 21.5MB
+# of interned strings (SHIFT64), which the old 16MB 2g value could not hold —
+# overflow does not error, it just stops interning, and every new string is
+# then duplicated into every worker's private memory. 2g therefore gets 24MB.
+# 1g stays at 16MB: a 64MB pool cannot spare more, and a 1GB box is not hosting
+# an equipped store. 4g/8g keep 32MB, the benchmark's own recommendation.
 _opcache_interned() {
     case "$1" in
-        1g|2g) echo 16 ;;
-        *)     echo 32 ;;
+        1g) echo 16 ;;
+        2g) echo 24 ;;
+        *)  echo 32 ;;
     esac
 }
 
