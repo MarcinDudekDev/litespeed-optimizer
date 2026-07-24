@@ -182,17 +182,31 @@ lso_max_connections() {
 # PHP Children Formula (SPEC §8) — the one computed value
 ################################################################################
 
+# lso_ram_overhead <ram_mb>
+# SINGLE SOURCE OF TRUTH for every non-PHP-worker RAM commitment. Prints five
+# space-separated MB values: "<reserve> <pool> <redis> <opcache> <misc>".
+#
+# Both lso_children() (which subtracts these to find what is left for workers)
+# and lso_ram_budget_check() (which sums them to audit the plan) MUST consume
+# this helper. They used to re-derive the same arithmetic — constants and all —
+# in two places, which is a guaranteed drift defect the moment one tier table
+# changes. Do not inline the formula back into either caller.
+lso_ram_overhead() {
+    local ram=$1
+    local reserve=$(( ram*12/100 )); [ "$reserve" -lt 512 ] && reserve=512
+    echo "$reserve $(lso_innodb_pool "$ram") $(lso_redis_mb "$ram") $(lso_opcache_mb "$ram") 150"
+}
+
 # lso_children <ram_mb> <cores> [rss_mb]
 # Computes PHP_LSAPI_CHILDREN from available RAM after reserving for the OS,
 # InnoDB pool, Redis, OPcache and LSWS itself; capped at cores*8, floor 8.
 lso_children() {
     local ram=$1 cores=$2 rss=${3:-80}            # rss measured or 80MB woo / 50MB wp default
-    local reserve=$(( ram*12/100 )); [ "$reserve" -lt 512 ] && reserve=512
-    local pool redis opcache
-    pool=$(lso_innodb_pool "$ram")
-    redis=$(lso_redis_mb "$ram")
-    opcache=$(lso_opcache_mb "$ram")
-    local avail=$(( ram - reserve - pool - redis - opcache - 150 ))   # 150MB lsws+misc
+    local reserve pool redis opcache misc
+    read -r reserve pool redis opcache misc <<EOF
+$(lso_ram_overhead "$ram")
+EOF
+    local avail=$(( ram - reserve - pool - redis - opcache - misc ))
     local n=$(( avail / rss ))
     local cpu_cap=$(( cores * 8 ))
     [ "$n" -gt "$cpu_cap" ] && n=$cpu_cap
@@ -207,13 +221,12 @@ lso_children() {
 # (The formula already reserves max(12%, 512MB) for the OS as headroom.)
 lso_ram_budget_check() {
     local ram=$1 cores=$2 rss=${3:-80}
-    local reserve=$(( ram*12/100 )); [ "$reserve" -lt 512 ] && reserve=512
-    local pool redis opcache children
-    pool=$(lso_innodb_pool "$ram")
-    redis=$(lso_redis_mb "$ram")
-    opcache=$(lso_opcache_mb "$ram")
+    local reserve pool redis opcache misc children
+    read -r reserve pool redis opcache misc <<EOF
+$(lso_ram_overhead "$ram")
+EOF
     children=$(lso_children "$ram" "$cores" "$rss")
-    local total=$(( reserve + pool + redis + opcache + 150 + children * rss ))
+    local total=$(( reserve + pool + redis + opcache + misc + children * rss ))
     if [ "$total" -le "$ram" ]; then
         echo "OK (${total}MB planned <= ${ram}MB RAM, incl. ${reserve}MB OS reserve)"
     else
