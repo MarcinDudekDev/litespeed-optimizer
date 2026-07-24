@@ -41,13 +41,37 @@ _lsapi_children() {
 }
 
 feature_apply_custom_lsapi_tuning() {
-    local ram tier conf children
+    local ram tier conf children rss budget
     ram=$(sysinfo_ram_mb)
     tier=$(sysinfo_ram_tier)
     conf="${LSO_MAIN_CONF:-}"
     children=$(_lsapi_children)
+    # Same RSS the children count was derived from. This used to default to 80
+    # here while _lsapi_children used the measured value, so on a box with real
+    # lsphp processes the printed budget audited a plan we had not made.
+    rss=$(sysinfo_lsphp_rss)
+    budget=$(lso_ram_budget_check "$ram" "$(sysinfo_cpu_cores)" "${rss:-80}")
 
-    log_info "LSAPI sizing: children=${children} (RAM budget: $(lso_ram_budget_check "$ram" "$(sysinfo_cpu_cores)"))"
+    # Report the budget at a severity that matches what it says. An OVERCOMMIT
+    # used to print through log_info, indistinguishable from a healthy config —
+    # so the box that most needed the warning produced the quietest output, and
+    # the only place the truth lived was a unit test.
+    #
+    # Small tiers genuinely overcommit: the hard floor of 8 children times an
+    # 80MB Woo RSS does not fit alongside the InnoDB pool, Redis and OPcache on
+    # a 1-2GB box. We still tune it — 1-2 workers is not a serving config and
+    # refusing to tune a small box helps nobody — but we say so out loud, with
+    # the consequence, so the operator can shrink a component or size up.
+    case "$budget" in
+        OVERCOMMIT*)
+            log_warn "LSAPI sizing: children=${children} — RAM ${budget}"
+            log_warn "  ${children} children x ${rss:-80}MB RSS does not fit beside MariaDB/Redis/OPcache on this box."
+            log_warn "  Expect the OOM killer under load. Lower the InnoDB pool or Redis maxmemory, or size the box up."
+            ;;
+        *)
+            log_info "LSAPI sizing: children=${children} (RAM budget: ${budget})"
+            ;;
+    esac
 
     if [ "${LSO_EDITION:-}" = "enterprise" ]; then
         _lsapi_apply_enterprise "$children"

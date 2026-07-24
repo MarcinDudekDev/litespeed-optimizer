@@ -520,6 +520,37 @@ if [ -z "$budget_bad" ]; then
 else
     log_fail "lso_ram_budget_check overcommits:${budget_bad}"
 fi
+# The overcommit must reach the OPERATOR at apply time, not just this test.
+# A budget that only a unit test ever sees is not a warning. Runs a real
+# optimize on a 1GB fixture and asserts the warning + its consequence surface.
+OC_FIX="${TEST_TMP}/overcommit-1g"
+OC_DATA="${TEST_TMP}/overcommit-1g-data"
+mkdir -p "$OC_DATA"
+cp -R "${CONFIGS_DIR}/plain-ols" "$OC_FIX"
+mkdir -p "$OC_FIX/etc/php.d"
+oc_out=$(LSO_DATA_DIR="$OC_DATA" LSO_FS_ROOT="$OC_FIX" LSO_RAM_MB=1024 LSO_CORES=1 \
+    LSO_PHP_INI_SCAN_DIR="$OC_FIX/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature lsapi-tuning --force 2>&1 || true)
+if echo "$oc_out" | grep -q "OVERCOMMIT" && echo "$oc_out" | grep -qi "OOM killer"; then
+    log_pass "lsapi apply: 1GB box loudly warns OVERCOMMIT + names the OOM consequence"
+else
+    log_fail "lsapi apply: overcommit not surfaced to the operator at apply time"
+fi
+# ...and a box that fits must NOT be given a scary warning it does not deserve.
+OC_FIX4="${TEST_TMP}/overcommit-8g"
+OC_DATA4="${TEST_TMP}/overcommit-8g-data"
+mkdir -p "$OC_DATA4"
+cp -R "${CONFIGS_DIR}/plain-ols" "$OC_FIX4"
+mkdir -p "$OC_FIX4/etc/php.d"
+oc_out4=$(LSO_DATA_DIR="$OC_DATA4" LSO_FS_ROOT="$OC_FIX4" LSO_RAM_MB=8192 LSO_CORES=4 \
+    LSO_PHP_INI_SCAN_DIR="$OC_FIX4/etc/php.d" LSO_SKIP_RESTART=1 LSO_WP_BIN=/nonexistent \
+    "${OPTIMIZER}" optimize --feature lsapi-tuning --force 2>&1 || true)
+if echo "$oc_out4" | grep -q "OVERCOMMIT"; then
+    log_fail "lsapi apply: 8GB box wrongly warned OVERCOMMIT (false alarm)"
+else
+    log_pass "lsapi apply: 8GB box stays quiet (no false overcommit alarm)"
+fi
+
 # Small boxes must keep REPORTING the overcommit rather than silently rounding
 # it away — a regression here would hide a real oversubscription from the user.
 if lso_ram_budget_check 1024 1 80 | grep -q "OVERCOMMIT" && \
