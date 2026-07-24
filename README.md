@@ -168,6 +168,28 @@ Skips cleanly when Docker is absent (CI target). Runs detect/check/dry-run plus 
 - **`wp-cli` + a CLI PHP** — required for the WordPress/WooCommerce features (LSCWP install, CVE gate, option get/set, `--profile auto` Woo detection). Override the binary with `LSO_WP_BIN` (e.g. run via the vhost's lsphp). Not needed for server-only tuning or `analyze --remote`.
 - **Optional:** `redis-cli` (object-cache detection), `mariadb`/`mysql` client (DB checks), `jq` (nicer `--json` handling).
 
+## Credits & Inspiration
+
+This tool is a synthesis of other people's measurements. The per-source detail lives inline in [`docs/research/`](docs/research/); the entries below are the ones that changed a number we ship.
+
+### SHIFT64 — the OPcache tier tables
+
+[**"1,200 Recompiles per Page View: The OPcache Failure No Hosting Dashboard Will Show You"**](https://shift64.com/blog/opcache-silent-killer-woocommerce-benchmark) (SHIFT64, 2026-07-22).
+
+This is the benchmark behind every value in `_opcache_max_files()` and `_opcache_interned()`. It is the rare performance write-up that publishes the instrumented numbers rather than a vibe, and it corrected a real bug in this repo. What we took from it:
+
+- **`max_accelerated_files` is a file *count*, not megabytes — and it usually binds first.** Reasoning about the OPcache buffer in MB is the default mistake, and it is why this directive goes untuned in essentially every guide. Their sweep is unambiguous: at 1,000 slots a Woo store did 1,149 recompiles per request; at 4,000 slots, zero.
+- **OPcache has no eviction policy.** When any of its three ceilings (memory, file slots, interned strings) is hit, it does not make room — it silently stops caching, forever, for whatever arrived last. Their store recompiled 49–66 admin files on *every* request because the admin's files showed up after the buffer filled. This is why our tiers deliberately oversize rather than right-size: a spare hash slot costs ~48 bytes, a missing one costs ~29% of throughput.
+- **Hit rate is a vanity metric.** A store can sit above 99% while recompiling ~1,200 files per page view. Watch `cache_full`, `num_cached_keys` vs `max_cached_keys`, and whether `misses` keeps climbing on a warm site — which is what `analyze` now reports on.
+- **The measured working set of one realistically-equipped store:** 5,168 file slots, 98.6MB of opcodes, 21.5MB of interned strings. Our 2g `interned_strings_buffer` was 16MB — under that measurement — and has been raised to 24MB because of this article.
+- **The ceilings belong to the PHP pool, not the site.** Prod + staging + dev of one store is 3× the working set against a single shared allocation. Our tier tables size for the pool.
+
+Independently reproduced here on PHP 8.5.1 before adopting: `max_accelerated_files` is rounded **up** to the next entry of a fixed prime table (1979, 3907, 7963, 16229, 32531, 65407, 130987 …), observable via `opcache_get_status()['opcache_statistics']['max_cached_keys']` — note that `opcache_get_configuration()` unhelpfully echoes back your raw ini value instead. Our old table asked for 20000/30000/50000, which resolved to 32531/32531/65407: the 4g tier's apparent 50% increase over 2g bought **zero** extra slots. Every tier value is now a real prime-table entry, so the generated ini states what PHP will actually do.
+
+### Not from easyinstallvps
+
+[easyinstallvps](https://github.com/sugan0927/easyinstallvps) is a genuinely useful one-click WordPress performance stack and covers adjacent ground, but — checked before writing this — none of the RAM-tier approach here came from it. Our tier tables trace to the sources cited in [`docs/research/03-stack-tuning.md`](docs/research/03-stack-tuning.md): [MariaDB's memory-allocation guidance](https://mariadb.com/docs/server/ha-and-performance/mariadb-memory-allocation) (buffer pool at 25–40% on a shared box), [Kevin Dees on PHP scaling](https://kevdees.com/how-to-configure-php-memory-and-php-fpm-for-scalable-performance-on-8-16-and-32-gb-servers) (children = free RAM ÷ per-worker RSS, ~50MB plain WP / 70–80MB Woo), Super Speedy Plugins and boostedhost (Redis sizing), and HostAccent (VPS tier minimums). Credit where it is actually owed.
+
 ## Security & contributing
 
 - **Security policy / reporting:** see [SECURITY.md](SECURITY.md).

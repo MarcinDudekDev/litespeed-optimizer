@@ -461,6 +461,131 @@ else
     log_fail "lso_children 8GB/8core out of range: $c_big"
 fi
 
+# lso_ram_overhead: the single source of truth both lso_children and
+# lso_ram_budget_check consume. Five fields, matching the tier tables.
+ovh_fields=$(lso_ram_overhead 4096 | wc -w | tr -d ' ')
+if [ "$ovh_fields" = "5" ]; then
+    log_pass "lso_ram_overhead prints 5 fields"
+else
+    log_fail "lso_ram_overhead field count wrong: $ovh_fields"
+fi
+read -r o_res o_pool o_redis o_opc o_misc <<EOF
+$(lso_ram_overhead 4096)
+EOF
+if [ "$o_pool" = "$(lso_innodb_pool 4096)" ] && [ "$o_redis" = "$(lso_redis_mb 4096)" ] && \
+   [ "$o_opc" = "$(lso_opcache_mb 4096)" ] && [ "$o_res" = "512" ] && [ "$o_misc" = "150" ]; then
+    log_pass "lso_ram_overhead components match tier tables (4GB)"
+else
+    log_fail "lso_ram_overhead mismatch: res=$o_res pool=$o_pool redis=$o_redis opc=$o_opc misc=$o_misc"
+fi
+# 512MB floor on the OS reserve applies below ~4.3GB
+read -r o_res_small _ _ _ _ <<EOF
+$(lso_ram_overhead 1024)
+EOF
+if [ "$o_res_small" = "512" ]; then
+    log_pass "lso_ram_overhead OS-reserve floor 512MB on 1GB box"
+else
+    log_fail "lso_ram_overhead reserve floor wrong: $o_res_small"
+fi
+
+# Extraction invariant: lso_children must equal what the shared overhead
+# implies, so a drifting second copy of the formula would fail here.
+read -r b_res b_pool b_redis b_opc b_misc <<EOF
+$(lso_ram_overhead 8192)
+EOF
+exp_children=$(( (8192 - b_res - b_pool - b_redis - b_opc - b_misc) / 50 ))
+[ "$exp_children" -gt 64 ] && exp_children=64
+if [ "$(lso_children 8192 8 50)" = "$exp_children" ]; then
+    log_pass "lso_children derives from lso_ram_overhead (no drift)"
+else
+    log_fail "lso_children drifted from lso_ram_overhead: got $(lso_children 8192 8 50), want $exp_children"
+fi
+
+# lso_ram_budget_check on the tiers that can actually fit the full stack.
+# NOTE: 1g/2g legitimately report OVERCOMMIT with an 80MB Woo RSS — the tier
+# tables plus the hard floor of 8 children exceed the box (1GB: 1686MB
+# planned). That is the check doing its job, not a bug in it, and it is
+# long-standing behaviour; the honest signal is the point of the ledger.
+# Anything from 4GB up must fit.
+budget_bad=""
+for _bram in 4096 8192 16384; do
+    _bout=$(lso_ram_budget_check "$_bram" 4 80)
+    case "$_bout" in
+        OK*) ;;
+        *) budget_bad="${budget_bad} ${_bram}MB:${_bout}" ;;
+    esac
+done
+if [ -z "$budget_bad" ]; then
+    log_pass "lso_ram_budget_check OK on 4g+ tiers"
+else
+    log_fail "lso_ram_budget_check overcommits:${budget_bad}"
+fi
+# Small boxes must keep REPORTING the overcommit rather than silently rounding
+# it away — a regression here would hide a real oversubscription from the user.
+if lso_ram_budget_check 1024 1 80 | grep -q "OVERCOMMIT" && \
+   lso_ram_budget_check 2048 2 80 | grep -q "OVERCOMMIT"; then
+    log_pass "lso_ram_budget_check still surfaces the 1g/2g Woo-RSS overcommit"
+else
+    log_fail "lso_ram_budget_check stopped reporting the known 1g/2g overcommit"
+fi
+# ...and it must actually be able to say OVERCOMMIT (guard against a check
+# that trivially returns OK because the children floor is never applied).
+if lso_ram_budget_check 1024 1 400 | grep -q "OVERCOMMIT"; then
+    log_pass "lso_ram_budget_check detects overcommit (1GB, 400MB RSS)"
+else
+    log_fail "lso_ram_budget_check never reports OVERCOMMIT"
+fi
+
+# OPcache tier values must be real entries of PHP's max_accelerated_files
+# prime table, otherwise the ini claims a slot count PHP silently changes.
+# Table verified on PHP 8.5.1 via opcache_get_status()'s max_cached_keys.
+OPC_PRIMES=" 1979 3907 7963 16229 32531 65407 130987 "
+# opcache.sh ends in feature_register, so registry.sh must be loaded first.
+read -r OPC_1G OPC_2G OPC_4G OPC_8G OPCI_1G OPCI_2G OPCI_4G OPCI_8G <<EOF
+$( . "${ROOT_DIR}/lib/registry.sh" >/dev/null 2>&1
+   . "${ROOT_DIR}/lib/features/opcache.sh" >/dev/null 2>&1
+   echo "$(_opcache_max_files 1g) $(_opcache_max_files 2g) $(_opcache_max_files 4g) $(_opcache_max_files 8g) $(_opcache_interned 1g) $(_opcache_interned 2g) $(_opcache_interned 4g) $(_opcache_interned 8g)" )
+EOF
+opc_bad=""
+for _v in "$OPC_1G" "$OPC_2G" "$OPC_4G" "$OPC_8G"; do
+    case "$OPC_PRIMES" in
+        *" $_v "*) ;;
+        *) opc_bad="${opc_bad} ${_v}" ;;
+    esac
+done
+if [ -z "$opc_bad" ]; then
+    log_pass "opcache max_accelerated_files values are all prime-table entries"
+else
+    log_fail "opcache max_accelerated_files not on prime table:${opc_bad}"
+fi
+# Each tier must be a genuine step up — the old 1g/2g=20000 vs 4g=30000 both
+# resolved to 32531, so the 4g "increase" bought zero slots.
+if [ "$OPC_1G" -lt "$OPC_2G" ] && [ "$OPC_2G" -lt "$OPC_4G" ] && [ "$OPC_4G" -lt "$OPC_8G" ]; then
+    log_pass "opcache max_accelerated_files strictly increases per tier"
+else
+    log_fail "opcache max_accelerated_files tiers not strictly increasing"
+fi
+# interned_strings_buffer must stay well inside memory_consumption (it is
+# carved out of the same pool) and cover one equipped Woo store (~21.5MB)
+# from the 2g tier up.
+if [ "$OPCI_2G" -ge 22 ] && [ "$OPCI_4G" -ge 22 ] && [ "$OPCI_8G" -ge 22 ]; then
+    log_pass "opcache interned buffer covers an equipped Woo store (>=22MB) from 2g up"
+else
+    log_fail "opcache interned buffer under-sized: 2g=$OPCI_2G 4g=$OPCI_4G 8g=$OPCI_8G"
+fi
+opc_int_bad=""
+for _pair in "1g:1024:$OPCI_1G" "2g:2048:$OPCI_2G" "4g:4096:$OPCI_4G" "8g:8192:$OPCI_8G"; do
+    _t=${_pair%%:*}; _rest=${_pair#*:}
+    _r=${_rest%%:*}; _int=${_rest#*:}
+    _mem=$(lso_opcache_mb "$_r")
+    [ "$_int" -ge $(( _mem / 2 )) ] && opc_int_bad="${opc_int_bad} ${_t}(${_int}/${_mem})"
+done
+if [ -z "$opc_int_bad" ]; then
+    log_pass "opcache interned buffer stays under half of memory_consumption"
+else
+    log_fail "opcache interned buffer too large vs pool:${opc_int_bad}"
+fi
+
 ################################################################################
 # SECTION 7: confedit Unit Tests
 ################################################################################
